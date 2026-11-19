@@ -12,7 +12,7 @@ from bcs.qa_supervisor import (
 )
 from bcs.runtime import create_runtime
 from bcs.qa import EvidenceStore
-from bcs.orchestrator import WorkerResult, WorkerResultStatus, WorkerTask
+from bcs.orchestrator import WorkerResult, WorkerResultStatus, WorkerTask, TaskState
 from bcs.providers import ProviderResponse
 from bcs.workspace import Workspace
 
@@ -102,6 +102,115 @@ class QAReviewHandoffTests(unittest.TestCase):
                 self.assertFalse(report.checks[0].executed)
             finally:
                 runtime.close()
+
+    def test_execute_with_qa_dispatches_repair_and_rechecks_original_task(self):
+        class SequenceSupervisor:
+            def __init__(self):
+                self.calls = 0
+            def review(self, task, result):
+                self.calls += 1
+                if self.calls == 1:
+                    return QAReview(
+                        task_id=task.task_id,
+                        status=ReviewStatus.REPAIR_REQUIRED,
+                        requirements=(("R1", "The modal closes after selection."),),
+                        findings=(ReviewFinding(
+                            requirement_id="R1", severity="high",
+                            issue="Frontend modal remains open.",
+                            expected="Modal closes after selection.",
+                            observed="Modal stays open.",
+                            suggestion="Fix modal state.", file_path="src/modal.tsx",
+                        ),),
+                        summary="Repair needed.",
+                        recommended_specialist="frontend-developer",
+                    )
+                return QAReview(
+                    task_id=task.task_id,
+                    status=ReviewStatus.READY_FOR_TESTS,
+                    requirements=(("R1", "The modal closes after selection."),),
+                    findings=(), summary="No source-level gap identified.",
+                    recommended_specialist=None,
+                )
+
+        runtime = create_runtime(database_path=":memory:")
+        try:
+            runtime.orchestrator.create_task(
+                task_id="auto-parent", objective="Implement modal close behavior.",
+                acceptance_criteria=["The modal closes after selection."],
+                role="builder",
+            )
+            calls = []
+            runtime.orchestrator.register_worker(
+                worker_id="builder", role="builder",
+                handler=lambda task: (
+                    calls.append(("builder", task.task_id))
+                    or WorkerResult(
+                        WorkerResultStatus.COMPLETED, "Initial implementation.",
+                        changed_files=("src/modal.tsx",),
+                    )
+                ),
+            )
+            runtime.orchestrator.register_worker(
+                worker_id="frontend", role="frontend-developer",
+                handler=lambda task: (
+                    calls.append(("frontend", task.task_id))
+                    or WorkerResult(
+                        WorkerResultStatus.COMPLETED, "Fixed modal state.",
+                        changed_files=("src/modal.tsx",),
+                    )
+                ),
+            )
+            outcome = runtime.execute_with_qa(
+                "auto-parent", SequenceSupervisor(), max_repair_rounds=2
+            )
+            self.assertEqual(outcome.state, FeedbackState.VERIFIED)
+            self.assertEqual(len(outcome.reviews), 2)
+            self.assertEqual(len(outcome.repair_task_ids), 1)
+            self.assertEqual(calls[0][0], "builder")
+            self.assertEqual(calls[1][0], "frontend")
+            self.assertEqual(runtime.orchestrator.get_task("auto-parent").state, TaskState.COMPLETED)
+            self.assertIn("not a substitute for executed test evidence", outcome.reason)
+        finally:
+            runtime.close()
+
+    def test_execute_with_qa_stops_when_repair_worker_is_unavailable(self):
+        class RepairSupervisor:
+            def review(self, task, result):
+                return QAReview(
+                    task_id=task.task_id,
+                    status=ReviewStatus.REPAIR_REQUIRED,
+                    requirements=(("R1", "API works."),),
+                    findings=(ReviewFinding(
+                        requirement_id="R1", severity="high",
+                        issue="Backend API endpoint is missing.",
+                        expected="API exists.", observed="No endpoint.",
+                        suggestion="Implement endpoint.", file_path="src/api.py",
+                    ),),
+                    summary="Backend repair needed.",
+                    recommended_specialist="backend-developer",
+                )
+
+        runtime = create_runtime(database_path=":memory:")
+        try:
+            runtime.orchestrator.create_task(
+                task_id="blocked-auto", objective="Build API",
+                acceptance_criteria=["API works."], role="builder",
+            )
+            runtime.orchestrator.register_worker(
+                worker_id="builder", role="builder",
+                handler=lambda task: WorkerResult(
+                    WorkerResultStatus.COMPLETED, "Initial work.",
+                    changed_files=("src/api.py",),
+                ),
+            )
+            outcome = runtime.execute_with_qa(
+                "blocked-auto", RepairSupervisor(), max_repair_rounds=1
+            )
+            self.assertEqual(outcome.state, FeedbackState.HUMAN_ATTENTION)
+            self.assertIn("no available specialist", outcome.reason)
+            self.assertEqual(runtime.orchestrator.get_task("blocked-auto").state, TaskState.COMPLETED)
+        finally:
+            runtime.close()
 
     def test_blocked_review_cannot_be_converted_to_success(self):
         review = QAReview(
