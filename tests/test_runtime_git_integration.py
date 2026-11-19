@@ -145,6 +145,12 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
         self.runtime.close()
         self.runtime = create_runtime(self.base / "bcs.sqlite3")
         self.assertEqual(history, self.runtime.integration_qa_history(integration.integration_id))
+        evidence = self.runtime.evidence_store.get(history[0]["evidence_refs"][0])
+        self.assertIsNotNone(evidence)
+        self.assertEqual(evidence.stdout, "ok")
+        self.assertEqual(evidence.content_sha256, self.runtime.evidence_store.get(
+            history[0]["evidence_refs"][0]
+        ).content_sha256)
 
     def test_static_only_pass_is_not_assessed_as_executed_qa(self):
         record, integration = self._completed_integration("static-task", "static-integration")
