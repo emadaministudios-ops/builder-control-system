@@ -2,6 +2,7 @@
 import hashlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -39,6 +40,7 @@ class BCSAPITests(unittest.TestCase):
         self.client = TestClient(create_app(runtime=self.runtime, authenticator=auth))
 
     def tearDown(self):
+        self.client.app.state.bcs_execution_jobs.stop(timeout=2)
         self.client.close()
         self.runtime.close()
 
@@ -167,9 +169,31 @@ class BCSAPITests(unittest.TestCase):
                 headers={"Authorization": f"Bearer {self.human_token}"},
                 json={"task_ids": [task_id]},
             )
-            self.assertEqual(dispatched.status_code, 200)
-            self.assertEqual(dispatched.json()["outcomes"][0]["state"], "completed")
+            self.assertEqual(dispatched.status_code, 202)
+            job_id = dispatched.json()["job"]["job_id"]
+            self.assertEqual(dispatched.json()["job"]["state"], "queued")
+            deadline = time.monotonic() + 5
+            status_response = self.client.get(
+                f"/v1/execution-jobs/{job_id}",
+                headers={"Authorization": f"Bearer {self.human_token}"},
+            )
+            while status_response.status_code == 200 and status_response.json()["job"]["state"] in {"queued", "running"} and time.monotonic() < deadline:
+                time.sleep(0.05)
+                status_response = self.client.get(
+                    f"/v1/execution-jobs/{job_id}",
+                    headers={"Authorization": f"Bearer {self.human_token}"},
+                )
+            self.assertEqual(status_response.status_code, 200)
+            self.assertEqual(status_response.json()["job"]["state"], "completed")
             self.assertEqual((root / "module.py").read_text(), "VALUE = 7\n")
+            other_owner = Principal("other-human", ActorType.HUMAN, frozenset({"tasks:read"}))
+            digest = hashlib.sha256(b"other-owner-token").hexdigest()
+            self.client.app.state.bcs_authenticator = TokenAuthenticator({digest: other_owner})
+            hidden = self.client.get(
+                f"/v1/execution-jobs/{job_id}",
+                headers={"Authorization": "Bearer other-owner-token"},
+            )
+            self.assertEqual(hidden.status_code, 404)
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
