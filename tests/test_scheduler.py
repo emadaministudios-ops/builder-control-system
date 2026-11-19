@@ -46,21 +46,21 @@ class TaskSchedulerTests(unittest.TestCase):
     def test_dispatch_plan_runs_dependency_waves_in_order(self):
         orchestrator = Orchestrator()
         orchestrator.create_task(
-            task_id="design", objective="Design API",
+            task_id="design", objective="Design API", role="architect",
             acceptance_criteria=["API contract is ready."],
         )
         orchestrator.create_task(
-            task_id="frontend", objective="Build frontend",
+            task_id="frontend", objective="Build frontend", role="frontend-developer",
             acceptance_criteria=["Frontend works."],
             dependency_ids=["design"],
         )
         orchestrator.create_task(
-            task_id="backend", objective="Build backend",
+            task_id="backend", objective="Build backend", role="backend-developer",
             acceptance_criteria=["Backend works."],
             dependency_ids=["design"],
         )
         orchestrator.create_task(
-            task_id="integration", objective="Integrate app",
+            task_id="integration", objective="Integrate app", role="integration-engineer",
             acceptance_criteria=["Integration works."],
             dependency_ids=["frontend", "backend"],
         )
@@ -104,11 +104,11 @@ class TaskSchedulerTests(unittest.TestCase):
     def test_dispatch_plan_leaves_dependants_queued_after_failed_prerequisite(self):
         orchestrator = Orchestrator()
         orchestrator.create_task(
-            task_id="design", objective="Design",
+            task_id="design", objective="Design", role="architect",
             acceptance_criteria=["Design is ready."],
         )
         orchestrator.create_task(
-            task_id="build", objective="Build",
+            task_id="build", objective="Build", role="backend-developer",
             acceptance_criteria=["Build works."],
             dependency_ids=["design"],
         )
