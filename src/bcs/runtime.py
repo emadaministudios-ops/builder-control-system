@@ -20,6 +20,7 @@ from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
 from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationRouter, ConsultationRoute, ConsultationRecord)
+from .consultation_feedback import ConsultationOutcome
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
@@ -227,6 +228,34 @@ class BCSRuntime:
     def consultation_history(self, task_id: str | None = None):
         """Return durable consultation decisions and specialist advice."""
         return self.store.list_consultations(task_id)
+
+    def record_consultation_outcome(
+        self, *, consultation_id: str, disposition: str, worker_reason: str = "",
+        qa_status: str = "not_assessed", qa_run_id: str | None = None,
+        evidence_refs: tuple[str, ...] = (),
+    ) -> ConsultationOutcome:
+        """Append worker-reported adoption and separately controller-supplied QA evidence."""
+        matches = [
+            item for item in self.store.list_consultations()
+            if item.consultation_id == consultation_id
+        ]
+        if len(matches) != 1:
+            raise KeyError("Consultation record does not exist.")
+        consultation = matches[0]
+        outcome = ConsultationOutcome(
+            outcome_id="outcome_" + uuid4().hex,
+            consultation_id=consultation_id, task_id=consultation.task_id,
+            disposition=disposition, worker_reason=worker_reason,
+            qa_status=qa_status, qa_run_id=qa_run_id,
+            evidence_refs=tuple(evidence_refs),
+            created_at=datetime.now(timezone.utc),
+        )
+        self.store.save_consultation_outcome(outcome)
+        return outcome
+
+    def consultation_outcome_history(self, task_id: str | None = None):
+        """Return append-only adoption and QA outcome records."""
+        return self.store.list_consultation_outcomes(task_id)
 
     def apply_qa_review(self, review: QAReview):
         """Persist QA feedback and enqueue deterministic repair handoffs."""
