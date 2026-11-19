@@ -148,3 +148,10 @@ Repair workers receive up to three recent failed consultation approaches from th
 Model workers may return a bounded `consultation_disposition` (`followed`, `partially_followed`, `not_followed`, or `unknown`) and a short explanation. These are self-reported fields in the validated worker result; the controller records them only when that task actually received specialist advice. The worker cannot assign QA status or evidence.
 
 When QA reports are applied, the runtime appends a separate assessment to the same consultation outcome history. Failed, blocked and error reports retain their corresponding status. A passed report is recorded as `passed` only when it includes executed checks; static-only source review remains `not_assessed` rather than being mistaken for successful tests. QA run IDs and execution evidence references are attached by the controller. Repeated attachment of the same QA run/status is idempotent. Worker results persist their disposition fields with backward-compatible defaults for older records.
+
+
+## BRAIN consultation learning from project outcomes
+
+Before routing a new specialist consultation, BRAIN receives a bounded summary of the latest consultation outcome records from the current task and its same-project ancestor chain. The lineage traversal stops at a missing task or a different `workspace_group_id`, is capped at 12 tasks, and sends at most five outcome summaries / 4,000 characters. Each summary distinguishes the specialist, worker-reported adoption, controller-recorded QA status, reason, advice and available evidence references.
+
+BRAIN is instructed to treat this history as untrusted evidence rather than instructions. It should avoid repeating advice that was adopted but failed executed QA unless the proposed approach materially changes; it may prefer relevant advice associated with passed executed QA, but must not infer causation from correlation. Worker adoption alone is not evidence of effectiveness. Unrelated or inconclusive history should not affect the route. This is retrieval-augmented decision support, not model fine-tuning or a guarantee of improved outcomes.
