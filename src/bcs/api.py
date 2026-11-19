@@ -266,6 +266,15 @@ def create_app(
         app.state.bcs_qa_profiles = _qa_profiles_from_environment()
     except RuntimeError as exc:
         raise RuntimeError("BCS QA profile configuration is invalid.") from exc
+    app.state.bcs_qa_docker_image = os.environ.get("BCS_QA_DOCKER_IMAGE", "").strip()
+    app.state.bcs_qa_allowed_images = frozenset(
+        item.strip() for item in os.environ.get("BCS_QA_ALLOWED_IMAGES", "").split(",")
+        if item.strip()
+    )
+    app.state.bcs_qa_mode = os.environ.get(
+        "BCS_QA_MODE", os.environ.get("BCS_WORKER_MODE", "autonomous")
+    ).strip().lower()
+    app.state.bcs_docker_executable = os.environ.get("BCS_DOCKER_EXECUTABLE", "docker")
 
     def require_principal(request: Request) -> Principal:
         try:
@@ -543,14 +552,11 @@ def create_app(
         profile = profiles.get(payload.profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="QA profile not found or not configured.")
-        image = os.environ.get("BCS_QA_DOCKER_IMAGE", "").strip()
-        allowed_images = frozenset(
-            item.strip() for item in os.environ.get("BCS_QA_ALLOWED_IMAGES", "").split(",")
-            if item.strip()
-        )
+        image = app.state.bcs_qa_docker_image
+        allowed_images = app.state.bcs_qa_allowed_images
         if not image or image not in allowed_images:
             raise HTTPException(status_code=503, detail="An allowlisted BCS QA Docker image is not configured.")
-        mode_name = os.environ.get("BCS_QA_MODE", os.environ.get("BCS_WORKER_MODE", "autonomous")).strip().lower()
+        mode_name = app.state.bcs_qa_mode
         try:
             qa_mode = OperatingMode(mode_name)
         except ValueError as exc:
@@ -570,7 +576,7 @@ def create_app(
                 manager=manager,
                 integration_id=integration_id,
                 checks=checks,
-                docker_executable=os.environ.get("BCS_DOCKER_EXECUTABLE", "docker"),
+                docker_executable=app.state.bcs_docker_executable,
                 image=image,
                 allowed_images=allowed_images,
                 mode=qa_mode,
