@@ -166,6 +166,12 @@ class QAReviewHandoffTests(unittest.TestCase):
             self.assertEqual(outcome.state, FeedbackState.VERIFIED)
             self.assertEqual(len(outcome.reviews), 2)
             self.assertEqual(len(outcome.repair_task_ids), 1)
+            repair_record = runtime.orchestrator.get_task(outcome.repair_task_ids[0])
+            parent_record = runtime.orchestrator.get_task("auto-parent")
+            self.assertEqual(
+                repair_record.task.workspace_group_id,
+                parent_record.task.workspace_group_id,
+            )
             self.assertEqual(calls[0][0], "builder")
             self.assertEqual(calls[1][0], "frontend")
             self.assertEqual(runtime.orchestrator.get_task("auto-parent").state, TaskState.COMPLETED)
