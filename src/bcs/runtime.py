@@ -5,7 +5,7 @@ lifecycle. It does not start an HTTP server or connect model providers yet.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from uuid import uuid4
 import os
@@ -13,8 +13,8 @@ from pathlib import Path
 
 from .approvals import ApprovalService
 from .feedback import FeedbackController, FeedbackState, FeedbackSnapshot
-from .qa import EvidenceStore, QAReport
-from .qa_runner import QAExecutionRunner
+from .qa import EvidenceStore, QAReport, QACheckStatus
+from .qa_runner import QAExecutionRunner, QACheckSpec
 from .sandbox_executor import DockerSandboxExecutor
 from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
@@ -245,12 +245,40 @@ class BCSRuntime:
         )
         return runner.run(task_id=task.task_id, checks=checks)
 
-    def review_and_handoff(self, task: WorkerTask, result, supervisor: QASupervisor):
-        """Run three-pass QA, persist its report, and enqueue any repair tasks."""
+    def review_and_handoff(
+        self, task: WorkerTask, result, supervisor: QASupervisor,
+        *, execution_report: QAReport | None = None,
+    ):
+        """Combine independent source review and executed checks into one feedback cycle."""
         review = supervisor.review(task, result)
         if review.status.value == "blocked":
             return review, None, None, ()
-        report, feedback_snapshot, repair_task_ids = self.apply_qa_review(review)
+        report = build_qa_report(review, self.evidence_store)
+        if execution_report is not None:
+            if execution_report.task_id != task.task_id:
+                raise ValueError("Executable QA report belongs to a different task.")
+            checks = report.checks + tuple(
+                replace(check, check_id="execution:" + check.check_id)
+                for check in execution_report.checks
+            )
+            statuses = {check.status for check in checks}
+            status = (
+                QACheckStatus.ERROR if QACheckStatus.ERROR in statuses else
+                QACheckStatus.FAILED if QACheckStatus.FAILED in statuses else
+                QACheckStatus.BLOCKED if QACheckStatus.BLOCKED in statuses else
+                QACheckStatus.PASSED
+            )
+            report = QAReport(
+                contract_version=report.contract_version,
+                task_id=task.task_id,
+                qa_run_id=execution_report.qa_run_id,
+                status=status,
+                checks=checks,
+                started_at=min(report.started_at, execution_report.started_at),
+                finished_at=max(report.finished_at, execution_report.finished_at),
+            )
+        feedback_snapshot = self.feedback.record_qa_report(report)
+        repair_task_ids = self.orchestrator.ingest_qa_report(report)
         return review, report, feedback_snapshot, repair_task_ids
 
     def execute_with_qa(
@@ -259,6 +287,13 @@ class BCSRuntime:
         supervisor: QASupervisor,
         *,
         max_repair_rounds: int = 3,
+        executable_checks: tuple[QACheckSpec, ...] | list[QACheckSpec] | None = None,
+        qa_workspace_factory=None,
+        docker_executable: str | None = None,
+        qa_image: str | None = None,
+        allowed_qa_images: frozenset[str] | None = None,
+        qa_mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        qa_limits: SandboxLimits = SandboxLimits(),
     ) -> AutonomousRunResult:
         """Run a task, repair QA findings, and independently review each repair.
 
@@ -276,6 +311,21 @@ class BCSRuntime:
             or not 1 <= max_repair_rounds <= 5
         ):
             raise ValueError("max_repair_rounds must be between 1 and 5.")
+        executable_config = (
+            executable_checks is not None, qa_workspace_factory is not None,
+            docker_executable is not None, qa_image is not None,
+            allowed_qa_images is not None,
+        )
+        if any(executable_config) and not all(executable_config):
+            raise ValueError(
+                "Executable QA requires checks, a trusted workspace factory, "
+                "Docker executable, image, and image allowlist together."
+            )
+        if executable_checks is not None:
+            if not executable_checks or any(not isinstance(item, QACheckSpec) for item in executable_checks):
+                raise ValueError("Executable QA requires controller-defined QACheckSpec entries.")
+            if not isinstance(qa_mode, OperatingMode):
+                raise TypeError("qa_mode must be an OperatingMode value.")
         record = self.orchestrator.get_task(task_id)
         if record is None:
             raise KeyError("Task does not exist.")
@@ -296,8 +346,20 @@ class BCSRuntime:
 
         current_result = initial.result
         for repair_round in range(max_repair_rounds + 1):
+            execution_report = None
+            if executable_checks is not None:
+                execution_report = self.run_executable_qa(
+                    record.task, executable_checks,
+                    workspace_factory=qa_workspace_factory,
+                    docker_executable=docker_executable,
+                    image=qa_image,
+                    allowed_images=allowed_qa_images,
+                    mode=qa_mode,
+                    limits=qa_limits,
+                )
             review, report, snapshot, repair_ids = self.review_and_handoff(
-                record.task, current_result, supervisor
+                record.task, current_result, supervisor,
+                execution_report=execution_report,
             )
             reviews.append(review)
             if review.status.value == "blocked" or report is None:
@@ -312,7 +374,8 @@ class BCSRuntime:
                     task_id, snapshot.state, tuple(dispatches), tuple(reviews),
                     tuple(repairs), snapshot,
                     "QA feedback policy completed its required independent review cycles. "
-                    "This is not a substitute for executed test evidence or release approval.",
+                    + ("Controller-defined sandbox tests were executed on each pass. " if executable_checks is not None else "No executable tests were configured. ")
+                    + "This is not release approval.",
                 )
             if snapshot.state in {
                 FeedbackState.HUMAN_ATTENTION,
