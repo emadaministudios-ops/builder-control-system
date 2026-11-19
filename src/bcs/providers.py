@@ -153,7 +153,71 @@ class OpenAICompatibleProvider:
         )
 
 
+class ProviderRegistry:
+    """Explicit provider selection; never silently switches models on failure."""
+
+    def __init__(self, *, default_provider_id: str | None = None) -> None:
+        self._providers: dict[str, OpenAICompatibleProvider] = {}
+        self._default_provider_id = default_provider_id
+
+    def register(self, config: ProviderConfig, *, make_default: bool = False) -> None:
+        if config.provider_id in self._providers:
+            raise ValueError("Provider ID is already registered.")
+        self._providers[config.provider_id] = OpenAICompatibleProvider(config)
+        if make_default or self._default_provider_id is None:
+            self._default_provider_id = config.provider_id
+
+    def provider_ids(self) -> tuple[str, ...]:
+        return tuple(sorted(self._providers))
+
+    @property
+    def default_provider_id(self) -> str | None:
+        return self._default_provider_id
+
+    def complete(self, messages, *, provider_id: str | None = None,
+                 temperature: float = 0.2, max_tokens: int = 1024) -> ProviderResponse:
+        selected = provider_id or self._default_provider_id
+        if selected is None:
+            raise ProviderError("No model provider has been configured.")
+        provider = self._providers.get(selected)
+        if provider is None:
+            raise ProviderError("Requested model provider is not registered.")
+        return provider.complete(
+            messages, temperature=temperature, max_tokens=max_tokens
+        )
+
+
+def provider_configs_from_environment() -> tuple[ProviderConfig, ...]:
+    """Load optional local/cloud provider definitions without reading API secrets."""
+    configs = []
+    ollama_model = os.environ.get("BCS_OLLAMA_MODEL")
+    if ollama_model:
+        configs.append(ProviderConfig(
+            provider_id="ollama",
+            base_url=os.environ.get(
+                "BCS_OLLAMA_BASE_URL", "http://127.0.0.1:11434/v1"
+            ),
+            model=ollama_model,
+        ))
+
+    cloud_model = os.environ.get("BCS_CLOUD_MODEL")
+    cloud_url = os.environ.get("BCS_CLOUD_BASE_URL")
+    if cloud_model or cloud_url:
+        if not cloud_model or not cloud_url:
+            raise ValueError(
+                "BCS_CLOUD_MODEL and BCS_CLOUD_BASE_URL must be configured together."
+            )
+        configs.append(ProviderConfig(
+            provider_id="cloud",
+            base_url=cloud_url,
+            model=cloud_model,
+            api_key_env=os.environ.get("BCS_CLOUD_API_KEY_ENV", "OPENAI_API_KEY"),
+        ))
+    return tuple(configs)
+
+
 __all__ = [
     "ProviderError", "ProviderConfig", "ProviderResponse",
-    "OpenAICompatibleProvider",
+    "OpenAICompatibleProvider", "ProviderRegistry",
+    "provider_configs_from_environment",
 ]
