@@ -133,7 +133,7 @@ def _qa_profiles_from_environment() -> dict[str, tuple[dict[str, Any], ...]]:
             if (not isinstance(check_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", check_id)
                 or check_id in seen or not isinstance(name, str) or not name.strip() or len(name) > 160
                 or not isinstance(argv, list) or not 1 <= len(argv) <= 32
-                or any(not isinstance(part, str) or not part or len(part) > 512 or "\\x00" in part for part in argv)
+                or any(not isinstance(part, str) or not part or len(part) > 512 or "\x00" in part for part in argv)
                 or argv[0] not in allowed):
                 raise RuntimeError(f"QA profile {profile_id} contains an invalid or non-allowlisted command.")
             seen.add(check_id)
