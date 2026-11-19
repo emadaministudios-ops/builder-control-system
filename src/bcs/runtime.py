@@ -804,6 +804,11 @@ class BCSRuntime:
                     "is completed: " + ", ".join(unfinished[:10])
                 )
 
+        if any(
+            item["integration_id"] == integration_id
+            for item in self.store.list_integration_runs()
+        ):
+            raise ValueError("Integration ID already exists in durable history.")
         coordinator = self.create_git_integration_coordinator(manager)
         result = coordinator.integrate(
             integration_id=integration_id,
