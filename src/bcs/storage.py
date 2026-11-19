@@ -933,6 +933,8 @@ class SQLiteOrchestrationStore:
             return {
                 "job_id": data["job_id"], "requested_by": data["requested_by"],
                 "state": data["state"], "task_ids": tuple(data["task_ids"]),
+                "job_type": data.get("job_type", "tasks"),
+                "metadata": data.get("metadata", {}),
                 "created_at": data["created_at"], "updated_at": data["updated_at"],
                 "attempt": data["attempt"], "lease_owner": data.get("lease_owner"),
                 "lease_expires_at": data.get("lease_expires_at"),
@@ -942,8 +944,14 @@ class SQLiteOrchestrationStore:
             raise StorageError("Stored execution job is invalid.") from exc
 
     def enqueue_execution_job(self, *, job_id: str, task_ids, requested_by: str,
-                              now: datetime) -> dict:
+                              now: datetime, job_type: str = "tasks",
+                              metadata: dict | None = None) -> dict:
         ids = tuple(task_ids)
+        metadata = {} if metadata is None else metadata
+        if job_type not in {"tasks", "integration_qa"} or not isinstance(metadata, dict):
+            raise StorageError("Execution job type or metadata is invalid.")
+        if len(self._json(metadata).encode("utf-8")) > 16_384:
+            raise StorageError("Execution job metadata exceeds the storage limit.")
         if not isinstance(job_id, str) or not job_id or len(job_id) > 128:
             raise StorageError("Execution job ID is invalid.")
         if not isinstance(requested_by, str) or not requested_by or len(requested_by) > 256:
@@ -955,7 +963,8 @@ class SQLiteOrchestrationStore:
         timestamp = self._timestamp(now)
         data = {
             "version": 1, "job_id": job_id, "requested_by": requested_by,
-            "state": "queued", "task_ids": list(ids), "created_at": timestamp,
+            "state": "queued", "task_ids": list(ids), "job_type": job_type,
+            "metadata": metadata, "created_at": timestamp,
             "updated_at": timestamp, "attempt": 0, "lease_owner": None,
             "lease_expires_at": None, "outcomes": [], "error": None,
         }
@@ -973,7 +982,9 @@ class SQLiteOrchestrationStore:
                     """, (job_id, requested_by, timestamp, timestamp, encoded))
             except sqlite3.IntegrityError:
                 existing = self.get_execution_job(job_id)
-                if existing is None or existing["requested_by"] != requested_by or existing["task_ids"] != ids:
+                if (existing is None or existing["requested_by"] != requested_by
+                    or existing["task_ids"] != ids or existing["job_type"] != job_type
+                    or existing["metadata"] != metadata):
                     raise StorageError("Execution job ID conflicts with an existing job.")
                 return existing
             except sqlite3.Error as exc:
