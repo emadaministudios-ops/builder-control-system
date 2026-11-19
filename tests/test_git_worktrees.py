@@ -54,6 +54,21 @@ class GitWorktreeManagerTests(unittest.TestCase):
         self.assertEqual(first.root, second.root)
         self.assertEqual(first.workspace_id, second.workspace_id)
 
+    def test_existing_project_worktree_is_restored_after_manager_restart(self):
+        first = self.manager.workspace_for_group("persistent-project")
+        (first.root / "project.py").write_text("VALUE = 42\\n", encoding="utf-8")
+        restarted = GitWorktreeManager(
+            repository_root=self.repo,
+            worktree_root=self.base / "worktrees",
+        )
+        restored = restarted.workspace_for_group("persistent-project")
+        self.assertEqual(first.root, restored.root)
+        self.assertEqual((restored.root / "project.py").read_text(), "VALUE = 42\\n")
+        self.assertEqual(
+            restarted.record_for_group("persistent-project").branch,
+            self.manager.record_for_group("persistent-project").branch,
+        )
+
     def test_workspace_for_task_uses_stable_group_not_task_id(self):
         class Task:
             task_id = "repair-2"
