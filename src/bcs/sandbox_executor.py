@@ -69,8 +69,12 @@ class DockerSandboxExecutor:
     ) -> ExecutionResult:
         """Execute a command or return blocked pending a matching human approval."""
         # Include every execution-affecting setting in the approval fingerprint.
+        if isinstance(argv, (str, bytes)) or not isinstance(argv, Sequence) or not argv:
+            return ExecutionResult("error", "Command must be a non-empty argument vector.")
+        if any(not isinstance(arg, str) or "\x00" in arg for arg in argv) or not argv[0]:
+            return ExecutionResult("error", "Command arguments must be NUL-free strings and start with an executable.")
         arguments = {
-            "argv": list(argv) if not isinstance(argv, (str, bytes)) else argv,
+            "argv": list(argv),
             "image": self._image,
             "limits": {
                 "memory": self._limits.memory, "cpus": self._limits.cpus,
@@ -175,8 +179,6 @@ class DockerSandboxExecutor:
             except (subprocess.TimeoutExpired, OSError):
                 pass
             # Killing the CLI may not kill the container. Explicitly stop and remove it.
-            for action in ("kill", "rm", "-f"):
-                pass
             try:
                 self._cleanup_runner(
                     (self._docker, "kill", container_name),
