@@ -48,6 +48,7 @@ class WorkerTask:
     acceptance_criteria: tuple[str, ...]
     evidence_refs: tuple[str, ...]
     attempt: int = 1
+    dependency_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,7 @@ class Orchestrator:
         objective: str,
         acceptance_criteria: tuple[str, ...] | list[str],
         role: str = "builder",
+        dependency_ids: tuple[str, ...] | list[str] = (),
     ) -> TaskRecord:
         """Create a queued top-level task from a trusted controller/API request."""
         if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
@@ -144,6 +146,13 @@ class Orchestrator:
             for item in acceptance_criteria
         ):
             raise ValueError("Acceptance criteria must contain at most 50 non-empty strings.")
+        if isinstance(dependency_ids, (str, bytes)) or not isinstance(dependency_ids, (tuple, list)):
+            raise ValueError("Dependency IDs must be a list of task IDs.")
+        if len(set(dependency_ids)) != len(dependency_ids) or any(
+            not isinstance(item, str) or not item.strip() or item == task_id
+            for item in dependency_ids
+        ):
+            raise ValueError("Dependency IDs must be unique, non-empty, and not self-referential.")
         task = WorkerTask(
             task_id=task_id.strip(),
             parent_task_id="",
@@ -151,6 +160,7 @@ class Orchestrator:
             objective=objective.strip(),
             acceptance_criteria=tuple(item.strip() for item in acceptance_criteria),
             evidence_refs=(),
+            dependency_ids=tuple(dependency_ids),
         )
         now = datetime.now(timezone.utc)
         record = TaskRecord(task, TaskState.QUEUED, created_at=now, updated_at=now)
@@ -210,6 +220,24 @@ class Orchestrator:
                 return DispatchOutcome(
                     task_id, record.state, record.assigned_worker_id, record.result,
                     "Only queued tasks can be dispatched",
+                )
+            missing = [
+                dependency for dependency in record.task.dependency_ids
+                if dependency not in self._tasks
+            ]
+            if missing:
+                return DispatchOutcome(
+                    task_id, TaskState.QUEUED, None, None,
+                    "Unknown prerequisite task(s): " + ", ".join(missing),
+                )
+            incomplete = [
+                dependency for dependency in record.task.dependency_ids
+                if self._tasks[dependency].state != TaskState.COMPLETED
+            ]
+            if incomplete:
+                return DispatchOutcome(
+                    task_id, TaskState.QUEUED, None, None,
+                    "Waiting for completed prerequisite task(s): " + ", ".join(incomplete),
                 )
             candidates = [
                 (worker_id, handler)
@@ -294,6 +322,7 @@ class Orchestrator:
             task = WorkerTask(
                 old.task_id, old.parent_task_id, old.role, old.objective,
                 old.acceptance_criteria, old.evidence_refs, old.attempt + 1,
+                old.dependency_ids,
             )
             updated = TaskRecord(
                 task, TaskState.QUEUED, created_at=record.created_at,
