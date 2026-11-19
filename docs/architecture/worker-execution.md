@@ -68,6 +68,14 @@ The worker:
 
 Current limitation: the worker does not yet have a complete iterative tool loop for reading arbitrary project context, running tests, receiving QA findings and repairing automatically. It currently accepts structured file-edit proposals. Do not interpret a model response as proof that code works.
 
+## Integration of completed worker branches
+
+`GitIntegrationCoordinator` can snapshot dirty, completed worker work onto each worker group's own branch, then create a separate `bcs/integration/` worktree from the configured `development` base and cherry-pick those branch commits into it. The caller supplies the exact workspace group IDs to include; the coordinator does not infer completion or select tasks on its own. It refuses credential-like filenames such as `.env`, `.npmrc`, private-key names and common credentials files before staging.
+
+If Git reports a content conflict, the coordinator aborts the in-progress cherry-pick and returns the conflicting paths. Worker branches remain unchanged; already-applied commits remain only on the isolated integration branch. A conflict result must be resolved by a repair/integration worker and reviewed again.
+
+A conflict-free result is marked `awaiting_qa`, not passed or releasable. The coordinator does not push, update `development`, update `main`, or approve promotion. QA execution, durable integration-run records, restart recovery and explicit human promotion approval remain separate follow-up work. The integration coordinator is currently an explicit controller service, not automatically invoked by every completed task.
+ 
 ## Controller-managed Git worktrees
 
 A controller-owned `GitWorktreeManager` provides the trusted workspace factory needed by model workers. Construct it with an explicit repository root and a worktree storage directory outside that repository, then pass `manager.workspace_for_task` as the trusted `workspace_factory` to `register_model_worker`. It creates isolated directories and dedicated branches from `development`, keyed by stable workspace group IDs. QA repair tasks therefore return to the original project's worktree, while unrelated project groups get separate worktrees. The runtime lease serializes tasks that share a physical checkout.
