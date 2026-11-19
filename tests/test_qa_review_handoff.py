@@ -305,11 +305,10 @@ class QAReviewHandoffTests(unittest.TestCase):
                 self.assertEqual(FakeExecutor.calls, 2)
                 self.assertEqual(outcome.state, FeedbackState.VERIFIED)
                 self.assertEqual(len(outcome.repair_task_ids), 1)
-                self.assertTrue(any(
-                    check.executed and check.status.value == "failed"
-                    for review in outcome.reviews
-                    for check in runtime.evidence_store._items.values()
-                ) is False)
+                self.assertEqual(
+                    [cycle.report_status.value for cycle in outcome.feedback.cycles],
+                    ["failed", "passed"],
+                )
                 self.assertIn("Controller-defined sandbox tests were executed", outcome.reason)
             finally:
                 runtime.close()
