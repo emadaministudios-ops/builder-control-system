@@ -1,6 +1,6 @@
 # BCS API setup (development)
 
-The control API is a FastAPI application. It exposes health, top-level task intake, task status, approval decisions, QA feedback, integration history and human-gated integration promotion controls.
+The control API is a FastAPI application. It exposes health, top-level task intake, task status, approval decisions, QA feedback, integration history and human-gated integration promotion controls. It also serves the connected BCS dashboard at `/` (redirects to `/dashboard/`) when the repository's `dashboard/` directory is present.
 
 ## 1. Install dependencies
 
@@ -72,7 +72,7 @@ On Windows PowerShell, set environment variables with `$env:NAME = "value"` and 
 
 The default bind address is loopback for local development. For cloud hosting, put the service behind a TLS-terminating reverse proxy, restrict network access, and inject token hashes through the deployment secret/configuration manager. Do not expose an unencrypted API directly to the public internet.
 
-## 4. Current API routes
+## 4. BCS dashboard\n\nOpen `http://127.0.0.1:8000/` after starting the API. The dashboard uses the same-origin API by default; enter the bearer token in the connection panel. The token is held in page memory only and is not written to browser storage. It can submit complete builds through `POST /v1/builds`, display tasks and execution jobs, decide pending approvals as a human, queue integration QA using an operator-configured profile ID, and request or execute an already-approved fast-forward promotion to `development`. The dashboard does not expose provider secrets or let the browser choose repository paths, Docker commands, images, or a target branch. Keep it behind TLS and the same authentication controls as the API.\n\n## 5. Current API routes
 
 | Method | Route | Authentication |
 |---|---|---|
@@ -92,7 +92,7 @@ For a single-request build, `POST /v1/builds` accepts the original objective and
 A human can submit the task IDs returned by `/v1/plans` to `/v1/tasks/dispatch`; the API validates task existence, persists an execution job, and returns HTTP 202 with a job ID. A background runner claims queued jobs using expiring SQLite leases and runs dependency-ready waves. When a trusted Git manager and model provider are configured, the runner also performs three-pass source QA on completed specialist tasks, creates bounded repair tasks from findings, and reviews repairs. Job outcomes expose each task's QA status. Without the trusted Git manager/provider, BCS runs dispatch only and QA remains unconfigured. Automatic source review does not run project tests; executable QA still requires separately configured controller-defined sandbox checks. Poll `/v1/execution-jobs/{job_id}` or list the caller's jobs at `/v1/execution-jobs`. Jobs are scoped to the authenticated requester. `BCS_WORKER_MODE` selects `autonomous` (default) or `supervised`; workers only receive workspace read/edit capabilities. If no provider or Git manager is configured, no default workers are registered. SQLite is a development persistence adapter; production multi-user deployment still requires PostgreSQL, hardened identity/token rotation, TLS, rate limiting, backups and operational monitoring.
 
 
-## 5. Git integration controls
+## 6. Git integration controls
 
 Promotion routes are disabled unless the API process is constructed with a trusted `GitWorktreeManager`. This is intentional: API callers must never choose a repository root, worktree directory, Git executable, or target branch. The standard app factory can construct the manager from the operator-controlled `BCS_GIT_REPOSITORY_ROOT` and `BCS_GIT_WORKTREE_ROOT` environment variables (both must be set). Alternatively, the hosting application may construct and inject it into `create_app(runtime=..., authenticator=..., git_manager=...)`. Keep the source repository checkout and worktree storage on persistent, access-restricted volumes; the manager requires the worktree root to be outside the repository. The manager's base branch is fixed to `development`.
 
@@ -110,7 +110,7 @@ Set `BCS_GIT_REPOSITORY_ROOT` to the trusted source checkout and `BCS_GIT_WORKTR
 The development API uses a durable SQLite-backed queue and a process-local runner. The job record survives browser disconnects and process restarts; queued jobs and expired leases can be reclaimed. Execution is at-least-once, not exactly-once: a crash after a worker changes files but before job completion is committed can cause a reclaimed job to revisit its task IDs. The orchestrator fails in-flight task records closed on restart, so inspect task/workspace state before retrying uncertain work. SQLite is suitable for this single-instance development adapter, not a multi-replica cloud queue; production needs shared PostgreSQL/Redis-backed leasing, distributed worker coordination, monitoring and explicit recovery tooling.
 
 
-## 6. Executable integration QA profiles
+## 7. Executable integration QA profiles
 
 The operator may configure named, immutable test profiles through `BCS_QA_PROFILES_JSON`. Clients submit only a profile ID to `POST /v1/integrations/{integration_id}/qa`; they cannot supply command arguments, Docker images, repository paths or resource limits. Every profile command's executable must appear in the comma-separated `BCS_QA_ALLOWED_EXECUTABLES` allowlist. Configure `BCS_QA_DOCKER_IMAGE` and include that exact image in `BCS_QA_ALLOWED_IMAGES`. `BCS_DOCKER_EXECUTABLE` defaults to `docker`; `BCS_QA_MODE` defaults to `BCS_WORKER_MODE` (or `autonomous`) and accepts `supervised` or `autonomous`.
 
