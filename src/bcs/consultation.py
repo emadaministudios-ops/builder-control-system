@@ -116,4 +116,4 @@ class SpecialistConsultant:
         )
 
 
-__all__ = ["ALLOWED_SPECIALIST_ROLES", "SpecialistAdvice", "ConsultationError", "SpecialistConsultant"]
+__all__ = ["ALLOWED_SPECIALIST_ROLES", "SpecialistAdvice", "ConsultationError", "SpecialistConsultant", "ConsultationRoute", "ConsultationRouter"]
