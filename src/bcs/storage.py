@@ -163,6 +163,7 @@ class SQLiteOrchestrationStore:
                 "acceptance_criteria": list(task.acceptance_criteria),
                 "evidence_refs": list(task.evidence_refs),
                 "attempt": task.attempt,
+                "dependency_ids": list(task.dependency_ids),
             },
             "state": record.state.value,
             "assigned_worker_id": record.assigned_worker_id,
@@ -209,6 +210,7 @@ class SQLiteOrchestrationStore:
                 acceptance_criteria=tuple(raw["acceptance_criteria"]),
                 evidence_refs=tuple(raw["evidence_refs"]),
                 attempt=raw["attempt"],
+                dependency_ids=tuple(raw.get("dependency_ids", ())),
             )
             raw_result = data["result"]
             result = None if raw_result is None else WorkerResult(
