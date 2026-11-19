@@ -2,6 +2,28 @@
 
 This document describes the current development-stage execution components. It is not a production deployment guide.
 
+## BRAIN planning and dependency-aware execution
+
+The runtime exposes `plan_and_create_tasks(objective, acceptance_criteria)`. BRAIN asks the configured model to split the request into bounded specialist steps. Deterministic validation rejects unsupported roles, malformed steps, missing acceptance criteria, unknown dependencies, duplicate IDs, and dependency cycles. The validated plan is persisted as individual tasks with explicit prerequisite IDs.
+
+The authenticated API exposes the same workflow through `POST /v1/plans`. Only a human principal with the `tasks:create` scope may submit a top-level plan.
+
+Run a validated plan with:
+
+```python
+plan, records = runtime.plan_and_create_tasks(
+    "Build the requested feature",
+    ["The existing login flow remains intact."],
+)
+result = runtime.scheduler.dispatch_plan(
+    [record.task.task_id for record in records]
+)
+```
+
+The scheduler executes dependency-ready waves, parallelizing independent tasks up to the configured concurrency ceiling. The orchestrator independently checks prerequisites at dispatch time, so a direct dispatch call cannot bypass the dependency gate. If a prerequisite fails, is blocked, or has no available worker, its dependants remain queued rather than being treated as complete.
+
+The scheduler does not yet infer file-level conflicts or automatically allocate separate Git worktrees. The trusted workspace factory remains responsible for ensuring concurrently executing tasks do not mutate the same workspace.
+
 ## Model-backed specialist workers
 
 `BCSRuntime.register_model_worker(...)` registers a role-specific worker using the runtime's configured provider registry. The caller must supply a trusted `workspace_factory(task)` that returns the isolated `Workspace` assigned to that task.
