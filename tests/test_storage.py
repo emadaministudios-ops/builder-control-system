@@ -187,7 +187,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             connection.close()
             with SQLiteOrchestrationStore(path) as store:
                 version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-                self.assertEqual(version, 8)
+                self.assertEqual(version, 9)
                 self.assertEqual(store.list_consultations(), ())
 
     def test_integration_qa_assessment_is_durable_and_idempotent(self):
