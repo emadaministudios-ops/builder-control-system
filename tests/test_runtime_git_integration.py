@@ -90,7 +90,7 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
         self.assertEqual(1, len(history))
         self.assertEqual("durable-integration", history[0]["integration_id"])
         self.assertEqual(result.branch, history[0]["branch"])
-        self.assertEqual(("durable.py",), history[0]["included_groups"] if False else history[0]["included_groups"])
+        self.assertIn(record.task.workspace_group_id, history[0]["included_groups"])
         self.assertEqual("awaiting_qa", history[0]["status"])
 
     def test_runtime_blocks_queued_or_failed_groups(self):
