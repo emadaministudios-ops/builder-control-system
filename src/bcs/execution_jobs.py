@@ -52,9 +52,13 @@ class ExecutionJobService:
     def stop(self, timeout=5):
         self._stop.set()
         thread = self._thread
-        if thread is not None:
-            thread.join(timeout=max(0.0, timeout))
-        self._thread = None
+        if thread is None:
+            return True
+        thread.join(timeout=max(0.0, timeout))
+        stopped = not thread.is_alive()
+        if stopped:
+            self._thread = None
+        return stopped
 
     def run_once(self):
         now = datetime.now(timezone.utc)
