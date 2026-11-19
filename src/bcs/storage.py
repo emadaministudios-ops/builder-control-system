@@ -132,18 +132,18 @@ class SQLiteOrchestrationStore:
                         self._connection.execute(
                             f"PRAGMA user_version = {_SCHEMA_VERSION}"
                         )
-                    with self._connection:
-                        self._connection.execute("""
-                            CREATE TABLE IF NOT EXISTS specialist_consultations (
-                                consultation_id TEXT PRIMARY KEY,
-                                task_id TEXT NOT NULL,
-                                created_at TEXT NOT NULL,
-                                payload TEXT NOT NULL CHECK (json_valid(payload))
-                            )
-                        """)
-                        self._connection.execute(
-                            f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                with self._connection:
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS specialist_consultations (
+                            consultation_id TEXT PRIMARY KEY,
+                            task_id TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            payload TEXT NOT NULL CHECK (json_valid(payload))
                         )
+                    """)
+                    self._connection.execute(
+                        f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                    )
             except sqlite3.Error as exc:
                 raise StorageError("Could not initialize the BCS database.") from exc
 
