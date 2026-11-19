@@ -120,6 +120,49 @@ class Orchestrator:
             )
             self._store.save_state(task_values, escalation_values)
 
+    def create_task(
+        self,
+        *,
+        task_id: str,
+        objective: str,
+        acceptance_criteria: tuple[str, ...] | list[str],
+        role: str = "builder",
+    ) -> TaskRecord:
+        """Create a queued top-level task from a trusted controller/API request."""
+        if not isinstance(task_id, str) or not task_id.strip() or len(task_id) > 128:
+            raise ValueError("Task ID must be a non-empty string of at most 128 characters.")
+        if not isinstance(objective, str) or not objective.strip() or len(objective) > 20_000:
+            raise ValueError("Task objective must contain 1 to 20000 characters.")
+        if not isinstance(role, str) or not role.strip() or len(role) > 80:
+            raise ValueError("Task role must be a non-empty string of at most 80 characters.")
+        if isinstance(acceptance_criteria, (str, bytes)) or not isinstance(
+            acceptance_criteria, (tuple, list)
+        ):
+            raise ValueError("Acceptance criteria must be a list of strings.")
+        if len(acceptance_criteria) > 50 or any(
+            not isinstance(item, str) or not item.strip() or len(item) > 2000
+            for item in acceptance_criteria
+        ):
+            raise ValueError("Acceptance criteria must contain at most 50 non-empty strings.")
+        task = WorkerTask(
+            task_id=task_id.strip(),
+            parent_task_id="",
+            role=role.strip(),
+            objective=objective.strip(),
+            acceptance_criteria=tuple(item.strip() for item in acceptance_criteria),
+            evidence_refs=(),
+        )
+        now = datetime.now(timezone.utc)
+        record = TaskRecord(task, TaskState.QUEUED, created_at=now, updated_at=now)
+        with self._lock:
+            if task.task_id in self._tasks:
+                raise ValueError("Task ID already exists.")
+            proposed = dict(self._tasks)
+            proposed[task.task_id] = record
+            self._persist_state(proposed.values())
+            self._tasks = proposed
+        return record
+
     def register_worker(self, *, worker_id: str, role: str, handler: Callable):
         if not isinstance(worker_id, str) or not worker_id.strip():
             raise ValueError("Worker ID is required")
