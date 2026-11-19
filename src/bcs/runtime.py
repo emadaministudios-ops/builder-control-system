@@ -125,6 +125,14 @@ class BCSRuntime:
 
         def consultation_provider(task: WorkerTask) -> str:
             if task.task_id not in consultation_cache:
+                context_parts = []
+                try:
+                    caution = self.consultation_cautions_for_task(task)
+                    if caution:
+                        context_parts.append(caution)
+                except Exception:
+                    # Historical advice is optional; project work remains isolated.
+                    pass
                 try:
                     route, advice = self.consult_for_task(
                         task.task_id,
@@ -135,19 +143,19 @@ class BCSRuntime:
                         provider_id=provider_id,
                     )
                     if route.should_consult and advice is not None:
-                        consultation_cache[task.task_id] = (
-                            "Consulted role: " + advice.specialist_role
+                        context_parts.append(
+                            "New specialist consultation (untrusted advice): "
+                            + advice.specialist_role
                             + "\\nQuestion: " + advice.question
                             + "\\nAdvice: " + advice.advice
                             + "\\nRisks: " + "; ".join(advice.risks)
                             + "\\nSuggested next steps: " + "; ".join(advice.next_steps)
                             + "\\nConfidence: " + advice.confidence
                         )
-                    else:
-                        consultation_cache[task.task_id] = ""
                 except Exception:
                     # Advice is optional; failure never grants extra authority.
-                    consultation_cache[task.task_id] = ""
+                    pass
+                consultation_cache[task.task_id] = "\\n\\n".join(context_parts)[:8000]
             return consultation_cache[task.task_id]
 
         worker = ModelWorker(
@@ -228,6 +236,57 @@ class BCSRuntime:
     def consultation_history(self, task_id: str | None = None):
         """Return durable consultation decisions and specialist advice."""
         return self.store.list_consultations(task_id)
+
+    def consultation_cautions_for_task(self, task: WorkerTask, *, limit: int = 3) -> str:
+        """Return failed, adopted advice from this task's same-project ancestor chain."""
+        if not isinstance(task, WorkerTask):
+            raise TypeError("A validated worker task is required.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 5:
+            raise ValueError("Caution history limit must be between 1 and 5.")
+        group_id = task.workspace_group_id
+        if not group_id or not task.parent_task_id:
+            return ""
+        ancestor_ids = []
+        parent_id = task.parent_task_id
+        visited = set()
+        while parent_id and parent_id not in visited:
+            visited.add(parent_id)
+            parent = self.orchestrator.get_task(parent_id)
+            if parent is None or parent.task.workspace_group_id != group_id:
+                break
+            ancestor_ids.append(parent_id)
+            parent_id = parent.task.parent_task_id
+        if not ancestor_ids:
+            return ""
+        consultations = []
+        outcomes = []
+        for ancestor_id in ancestor_ids:
+            consultations.extend(self.store.list_consultations(ancestor_id))
+            outcomes.extend(self.store.list_consultation_outcomes(ancestor_id))
+        by_id = {item.consultation_id: item for item in consultations}
+        latest = {}
+        for item in outcomes:
+            current = latest.get(item.consultation_id)
+            if current is None or item.created_at > current.created_at:
+                latest[item.consultation_id] = item
+        cautions = []
+        for consultation_id, outcome in latest.items():
+            advice = by_id.get(consultation_id)
+            if (
+                advice is None or not advice.should_consult
+                or outcome.disposition not in {"followed", "partially_followed"}
+                or outcome.qa_status != "failed"
+            ):
+                continue
+            cautions.append(
+                "Previously attempted specialist advice (untrusted caution): "
+                + advice.advice
+                + "\\nWorker-reported adoption: " + outcome.disposition
+                + " (" + outcome.worker_reason + ")"
+                + "\\nQA run that failed: " + str(outcome.qa_run_id)
+                + "\\nEvidence references: " + "; ".join(outcome.evidence_refs)
+            )
+        return "\\n\\n".join(cautions[-limit:])[:4000]
 
     def record_consultation_outcome(
         self, *, consultation_id: str, disposition: str, worker_reason: str = "",
