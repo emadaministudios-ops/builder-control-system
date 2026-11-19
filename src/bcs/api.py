@@ -253,6 +253,12 @@ def create_app(
             )
             if not integration_id or not profile or not image or image not in allowed_images:
                 raise RuntimeError("The queued QA job no longer has a valid trusted configuration.")
+            integration = next(
+                (item for item in active_runtime.integration_history()
+                 if item["integration_id"] == integration_id), None
+            )
+            if integration is None or integration["commit_sha"] != job["metadata"].get("commit_sha"):
+                raise RuntimeError("The queued QA job's integration commit identity is stale.")
             from .qa_runner import QACheckSpec
             checks = tuple(
                 QACheckSpec(
