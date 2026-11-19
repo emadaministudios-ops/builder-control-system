@@ -15,6 +15,8 @@ from bcs.policy import ToolRequest
 from bcs.qa import EvidenceStore, QAReportBuilder
 from bcs.sandbox_executor import ExecutionResult
 from bcs.qa_runner import QACheckSpec
+from bcs.qa_supervisor import QAReview, ReviewStatus
+from bcs.orchestrator import WorkerResult, WorkerResultStatus
 from bcs.workspace import Workspace
 from bcs.policy import OperatingMode
 from bcs.runtime import create_runtime
@@ -64,6 +66,49 @@ class RuntimeCompositionTests(unittest.TestCase):
                 )
                 restored = reopened.approvals.get("runtime-approval")
                 self.assertEqual(restored.status, ApprovalStatus.APPROVED)
+
+
+    def test_dependency_plan_runs_qa_cycles_and_reports_source_only_status(self):
+        class FakeSupervisor:
+            def __init__(self):
+                self.calls = 0
+            def review(self, task, result):
+                self.calls += 1
+                return QAReview(
+                    task_id=task.task_id,
+                    status=ReviewStatus.READY_FOR_TESTS,
+                    requirements=(("R1", "The changed module exists."),),
+                    findings=(),
+                    summary="No source-level gaps identified.",
+                    recommended_specialist=None,
+                )
+
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = create_runtime(Path(folder) / "workflow.sqlite3")
+            try:
+                runtime.orchestrator.register_worker(
+                    worker_id="workflow-builder", role="builder",
+                    handler=lambda task: WorkerResult(
+                        WorkerResultStatus.COMPLETED, "Created module.",
+                        changed_files=("module.py",),
+                    ),
+                )
+                task = runtime.orchestrator.create_task(
+                    task_id="workflow-task", objective="Create module.",
+                    acceptance_criteria=("Module exists.",),
+                )
+                supervisor = FakeSupervisor()
+                outcomes = runtime.execute_plan_with_qa(
+                    [task.task.task_id], supervisor, max_repair_rounds=2,
+                )
+                self.assertEqual(len(outcomes), 1)
+                self.assertEqual(outcomes[0]["state"], "completed")
+                self.assertEqual(outcomes[0]["qa"]["status"], "source_review_complete")
+                self.assertEqual(outcomes[0]["qa"]["reviews"], 2)
+                self.assertEqual(supervisor.calls, 2)
+                self.assertIn("No executable tests", outcomes[0]["qa"]["reason"])
+            finally:
+                runtime.close()
 
     def test_environment_database_path_is_supported(self):
         with tempfile.TemporaryDirectory() as folder:
