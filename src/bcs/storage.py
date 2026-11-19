@@ -17,8 +17,9 @@ from typing import Iterable, TYPE_CHECKING
 if TYPE_CHECKING:
     from .orchestrator import TaskRecord
     from .qa_handoff import QAEscalation
+    from .approvals import ApprovalRequest
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 
 
 class StorageError(RuntimeError):
@@ -74,9 +75,30 @@ class SQLiteOrchestrationStore:
                                 payload TEXT NOT NULL CHECK (json_valid(payload))
                             )
                         """)
+                        self._connection.execute("""
+                            CREATE TABLE IF NOT EXISTS approval_requests (
+                                request_id TEXT PRIMARY KEY,
+                                status TEXT NOT NULL,
+                                expires_at TEXT NOT NULL,
+                                payload TEXT NOT NULL CHECK (json_valid(payload))
+                            )
+                        """)
                         self._connection.execute(
                             f"PRAGMA user_version = {_SCHEMA_VERSION}"
                         )
+                    if version == 1:
+                        with self._connection:
+                            self._connection.execute("""
+                                CREATE TABLE IF NOT EXISTS approval_requests (
+                                    request_id TEXT PRIMARY KEY,
+                                    status TEXT NOT NULL,
+                                    expires_at TEXT NOT NULL,
+                                    payload TEXT NOT NULL CHECK (json_valid(payload))
+                                )
+                            """)
+                            self._connection.execute(
+                                f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                            )
                 except sqlite3.Error as exc:
                     raise StorageError("Could not initialize the BCS database.") from exc
 
@@ -237,6 +259,95 @@ class SQLiteOrchestrationStore:
                     """, escalation_rows)
             except sqlite3.Error as exc:
                 raise StorageError("Could not commit orchestration state.") from exc
+
+    @staticmethod
+    def _approval_payload(record: "ApprovalRequest") -> dict:
+        return {
+            "version": 1,
+            "request_id": record.request_id,
+            "task_id": record.task_id,
+            "worker_id": record.worker_id,
+            "capability": record.capability,
+            "request_fingerprint": record.request_fingerprint,
+            "status": record.status.value,
+            "created_at": SQLiteOrchestrationStore._timestamp(record.created_at),
+            "expires_at": SQLiteOrchestrationStore._timestamp(record.expires_at),
+            "decided_at": (
+                None if record.decided_at is None
+                else SQLiteOrchestrationStore._timestamp(record.decided_at)
+            ),
+            "decided_by": record.decided_by,
+            "reason": record.reason,
+        }
+
+    @staticmethod
+    def _decode_approval(payload: str):
+        from .approvals import ApprovalRequest, ApprovalStatus
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported approval record version.")
+            created = datetime.fromisoformat(data["created_at"])
+            expires = datetime.fromisoformat(data["expires_at"])
+            decided = (
+                None if data["decided_at"] is None
+                else datetime.fromisoformat(data["decided_at"])
+            )
+            if any(value.tzinfo is None for value in (created, expires)):
+                raise ValueError("Naive approval timestamps are not accepted.")
+            if decided is not None and decided.tzinfo is None:
+                raise ValueError("Naive decision timestamp is not accepted.")
+            return ApprovalRequest(
+                request_id=data["request_id"],
+                task_id=data["task_id"],
+                worker_id=data["worker_id"],
+                capability=data["capability"],
+                request_fingerprint=data["request_fingerprint"],
+                status=ApprovalStatus(data["status"]),
+                created_at=created,
+                expires_at=expires,
+                decided_at=decided,
+                decided_by=data["decided_by"],
+                reason=data["reason"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StorageError("Stored approval record is invalid or unsupported.") from exc
+
+    def save_approval(self, record: "ApprovalRequest") -> None:
+        payload = self._approval_payload(record)
+        encoded = self._json(payload)
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute("""
+                        INSERT INTO approval_requests
+                            (request_id, status, expires_at, payload)
+                        VALUES (?, ?, ?, ?)
+                        ON CONFLICT(request_id) DO UPDATE SET
+                            status=excluded.status,
+                            expires_at=excluded.expires_at,
+                            payload=excluded.payload
+                    """, (
+                        record.request_id, record.status.value,
+                        payload["expires_at"], encoded,
+                    ))
+            except sqlite3.Error as exc:
+                raise StorageError("Could not commit approval record.") from exc
+
+    def get_approval(self, request_id: str):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM approval_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        return None if row is None else self._decode_approval(row["payload"])
+
+    def list_approvals(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM approval_requests ORDER BY expires_at, request_id"
+            ).fetchall()
+        return tuple(self._decode_approval(row["payload"]) for row in rows)
 
     def save_task(self, record: "TaskRecord") -> None:
         self.save_state((record,), ())
