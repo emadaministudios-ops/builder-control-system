@@ -100,6 +100,46 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             self.assertIn("task", parsed)
             store.close()
 
+
+    def test_qa_evidence_survives_close_and_reopen_with_digest(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "evidence.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            stdout, stderr = "all tests passed", "warning: none"
+            raw = (stdout + "\\n--- STDERR ---\\n" + stderr).encode("utf-8")
+            artifact = {
+                "evidence_ref": "ev_persistent-test",
+                "kind": "execution_output",
+                "content_sha256": hashlib.sha256(raw).hexdigest(),
+                "size_bytes": len(raw),
+                "stdout": stdout,
+                "stderr": stderr,
+            }
+            store.save_qa_evidence_artifact(artifact)
+            store.close()
+            reopened = SQLiteOrchestrationStore(path)
+            self.assertEqual(reopened.get_qa_evidence_artifact("ev_persistent-test"), artifact)
+            reopened.close()
+
+    def test_qa_evidence_rejects_content_digest_mismatch(self):
+        import hashlib
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "evidence.sqlite3")
+            raw = b"actual output"
+            artifact = {
+                "evidence_ref": "ev_tampered",
+                "kind": "execution_output",
+                "content_sha256": hashlib.sha256(b"different output").hexdigest(),
+                "size_bytes": len(raw),
+                "stdout": "actual output",
+                "stderr": "",
+            }
+            with self.assertRaises(StorageError):
+                store.save_qa_evidence_artifact(artifact)
+            self.assertIsNone(store.get_qa_evidence_artifact("ev_tampered"))
+            store.close()
+
     def test_schema_version_is_checked(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "bcs.sqlite3"
