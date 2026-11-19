@@ -196,6 +196,39 @@ class RuntimeCompositionTests(unittest.TestCase):
                     consultation_id="missing-consultation", disposition="unknown"
                 )
 
+    def test_brain_learning_context_is_scoped_to_same_project_lineage(self):
+        with create_runtime(":memory:") as runtime:
+            root = runtime.orchestrator.create_task(
+                task_id="learning-root", objective="Build a project",
+                acceptance_criteria=["Project works."], role="backend-developer",
+            )
+            consultation = ConsultationRecord(
+                consultation_id="learning-consult", task_id="learning-root",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="How should access be structured?",
+                reason="Architecture risk.", advice="Use a global singleton client.",
+                risks=(), next_steps=("Add singleton.",), confidence="high",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            runtime.store.save_consultation(consultation)
+            runtime.record_consultation_outcome(
+                consultation_id="learning-consult", disposition="followed",
+                worker_reason="Implemented the singleton client.",
+                qa_status="failed", qa_run_id="learning-qa-fail",
+                evidence_refs=("evidence:concurrency",),
+            )
+            child = WorkerTask(
+                task_id="learning-child", parent_task_id="learning-root",
+                role="backend-developer", objective="Repair the client.",
+                acceptance_criteria=("No shared mutable state.",),
+                evidence_refs=(), workspace_group_id=root.task.workspace_group_id,
+            )
+            context = runtime.consultation_learning_context(child)
+            self.assertIn("QA=failed", context)
+            self.assertIn("Use a global singleton client.", context)
+            isolated = replace(child, workspace_group_id="another-project")
+            self.assertEqual(runtime.consultation_learning_context(isolated), "")
+
     def test_repair_worker_receives_only_failed_advice_from_same_project_lineage(self):
         with create_runtime(":memory:") as runtime:
             root = runtime.orchestrator.create_task(
