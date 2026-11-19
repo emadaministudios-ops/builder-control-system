@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 5
+_SCHEMA_VERSION = 6
 
 
 class StorageError(RuntimeError):
@@ -150,6 +150,14 @@ class SQLiteOrchestrationStore:
                             payload TEXT NOT NULL CHECK (json_valid(payload)),
                             FOREIGN KEY (consultation_id)
                                 REFERENCES specialist_consultations(consultation_id)
+                        )
+                    """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS integration_runs (
+                            integration_id TEXT PRIMARY KEY,
+                            status TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            payload TEXT NOT NULL CHECK (json_valid(payload))
                         )
                     """)
                     self._connection.execute(
@@ -323,6 +331,57 @@ class SQLiteOrchestrationStore:
                     """, escalation_rows)
             except sqlite3.Error as exc:
                 raise StorageError("Could not commit orchestration state.") from exc
+
+    def save_integration_run(self, record: dict) -> None:
+        """Persist an immutable integration result; duplicate IDs are rejected."""
+        required = {"integration_id", "branch", "path", "status", "included_groups", "commits", "conflicts", "reason"}
+        if not isinstance(record, dict) or set(record) != required:
+            raise StorageError("Integration record has an invalid shape.")
+        if any(not isinstance(record[key], str) or not record[key] for key in ("integration_id", "branch", "path", "status")):
+            raise StorageError("Integration identity and status fields are required.")
+        for key in ("included_groups", "commits", "conflicts"):
+            value = record[key]
+            if not isinstance(value, (tuple, list)) or any(not isinstance(item, str) or not item for item in value):
+                raise StorageError("Integration collections must contain non-empty strings.")
+        if not isinstance(record["reason"], str) or len(record["reason"]) > 4000:
+            raise StorageError("Integration reason is invalid.")
+        payload = {"version": 1, **record,
+                   "included_groups": list(record["included_groups"]),
+                   "commits": list(record["commits"]),
+                   "conflicts": list(record["conflicts"])}
+        encoded = self._json(payload)
+        created_at = datetime.now().astimezone().isoformat()
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute(
+                        "INSERT INTO integration_runs (integration_id,status,created_at,payload) VALUES (?,?,?,?)",
+                        (record["integration_id"], record["status"], created_at, encoded),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise StorageError("Integration ID already exists; refusing duplicate integration record.") from exc
+            except sqlite3.Error as exc:
+                raise StorageError("Could not persist integration result.") from exc
+
+    def list_integration_runs(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM integration_runs ORDER BY created_at, integration_id"
+            ).fetchall()
+        records = []
+        for row in rows:
+            try:
+                data = json.loads(row["payload"])
+                if not isinstance(data, dict) or data.get("version") != 1:
+                    raise ValueError("Unsupported integration record.")
+                data.pop("version")
+                data["included_groups"] = tuple(data["included_groups"])
+                data["commits"] = tuple(data["commits"])
+                data["conflicts"] = tuple(data["conflicts"])
+                records.append(data)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise StorageError("Stored integration record is invalid.") from exc
+        return tuple(records)
 
     @staticmethod
     def _feedback_payload(record: "FeedbackCycle") -> dict:
