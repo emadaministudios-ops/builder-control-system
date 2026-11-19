@@ -101,6 +101,24 @@ class QASupervisorTests(unittest.TestCase):
         self.assertEqual(review.status, ReviewStatus.BLOCKED)
         self.assertEqual(providers.calls, [])
 
+
+    def test_analysis_only_worker_without_changed_files_can_be_reviewed(self):
+        providers = FakeProviders(self.responses("[]"))
+        supervisor = QASupervisor(providers=providers, gateway_factory=self.gateway)
+        analysis_task = WorkerTask(
+            task_id="analysis-task", parent_task_id="", role="requirements-analyst",
+            objective="Identify the requirements and edge cases.",
+            acceptance_criteria=("Requirements are clear and actionable.",),
+            evidence_refs=(),
+        )
+        analysis_result = WorkerResult(
+            WorkerResultStatus.COMPLETED,
+            "Identified the required user flows and edge cases.",
+        )
+        review = supervisor.review(analysis_task, analysis_result)
+        self.assertEqual(review.status, ReviewStatus.READY_FOR_TESTS)
+        self.assertEqual(len(providers.calls), 3)
+
     def test_model_cannot_reference_uninspected_file(self):
         findings = (
             '[{"requirement_id":"R1","severity":"high","issue":"Gap",'
