@@ -45,6 +45,17 @@ class BCSAPITests(unittest.TestCase):
         self.client.close()
         self.runtime.close()
 
+    def test_dashboard_is_served_by_the_control_api(self):
+        home = self.client.get("/", follow_redirects=False)
+        self.assertEqual(home.status_code, 307)
+        self.assertEqual(home.headers["location"], "/dashboard/")
+        page = self.client.get("/dashboard/")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("BCS", page.text)
+        script = self.client.get("/dashboard/app.js")
+        self.assertEqual(script.status_code, 200)
+        self.assertIn("/v1/builds", script.text)
+
     def test_health_is_available_without_credentials(self):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
