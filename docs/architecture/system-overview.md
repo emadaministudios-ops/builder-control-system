@@ -205,9 +205,9 @@ Cloud hosting must not assume a user's local Ollama instance is publicly reachab
 
 ## 9. Existing components and implementation status
 
-The repository contains foundational implementations for policy, approvals, workspaces, sandbox command construction/execution, QA reports and execution, QA-to-repair handoff, orchestration, SQLite persistence, runtime composition, model-provider adapters, persistent QA feedback cycles, and an authenticated FastAPI control API with top-level task intake.
+The repository contains foundational implementations for policy, approvals, workspaces, sandbox command construction/execution, QA reports and execution, QA-to-repair handoff, orchestration, SQLite persistence, runtime composition, model-provider adapters, persistent QA feedback cycles, an authenticated FastAPI control API with top-level task intake, model-backed specialist workers with policy-gated file edits, runtime worker registration, and bounded parallel task scheduling.
 
-These foundations do not yet constitute a fully autonomous live builder. In particular, actual model-backed worker handlers, resource-aware concurrent scheduling, automated QA-to-repair loop execution, dashboard, PostgreSQL production storage and live deployment remain to be implemented and verified.
+These foundations do not yet constitute a fully autonomous live builder. In particular, model workers do not yet have a complete multi-step read/plan/edit/test tool loop; QA does not yet autonomously supervise and feed findings into repeated repair cycles; dependency-aware planning, automatic specialist consultation, a dashboard, PostgreSQL production storage and live deployment remain to be implemented and verified.
 
 ## 10. Implementation sequence
 
