@@ -1314,7 +1314,7 @@ def create_runtime(
         )
         feedback = FeedbackController(store=store)
         scheduler = TaskScheduler(orchestrator, max_concurrency=max_concurrency)
-        evidence_store = EvidenceStore()
+        evidence_store = EvidenceStore(repository=store)
         planner = TaskPlanner(providers=providers, provider_id=default_provider_id)
         return BCSRuntime(
             store=store,
