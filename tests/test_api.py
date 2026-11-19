@@ -358,6 +358,24 @@ class BCSAPITests(unittest.TestCase):
                     _git_manager_from_environment().repository_root,
                     manager.repository_root,
                 )
+        with tempfile.TemporaryDirectory() as folder:
+            repository = Path(folder) / "separate-project-repository"
+            worktrees = Path(folder) / "isolated-worktrees"
+            with patch.dict(
+                "os.environ",
+                {
+                    "BCS_GIT_REPOSITORY_ROOT": str(repository),
+                    "BCS_GIT_WORKTREE_ROOT": str(worktrees),
+                },
+                clear=True,
+            ):
+                manager = _git_manager_from_environment()
+                self.assertTrue((repository / ".git").is_dir())
+                self.assertTrue(worktrees.is_dir())
+                self.assertEqual(
+                    manager._run(["symbolic-ref", "--short", "HEAD"]).stdout.strip(),
+                    "development",
+                )
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
