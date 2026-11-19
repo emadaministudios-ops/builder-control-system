@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from .approvals import ApprovalService
+from .feedback import FeedbackController
 from .orchestrator import Orchestrator
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
@@ -23,6 +24,7 @@ class BCSRuntime:
     store: SQLiteOrchestrationStore
     orchestrator: Orchestrator
     approvals: ApprovalService
+    feedback: FeedbackController
     providers: ProviderRegistry
 
     def close(self) -> None:
@@ -81,10 +83,12 @@ def create_runtime(
         approvals = ApprovalService(
             ttl=timedelta(seconds=approval_ttl_seconds), store=store
         )
+        feedback = FeedbackController(store=store)
         return BCSRuntime(
             store=store,
             orchestrator=orchestrator,
             approvals=approvals,
+            feedback=feedback,
             providers=providers,
         )
     except Exception:
