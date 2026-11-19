@@ -2,6 +2,14 @@
 
 This document describes the current development-stage execution components. It is not a production deployment guide.
 
+## Bounded autonomous QA repair loop
+
+The runtime exposes `execute_with_qa(task_id, supervisor, max_repair_rounds=3)` for a queued task with registered specialist workers. It dispatches the original worker, asks the three-pass QA supervisor to review the original objective and changed files, creates repair tasks from failed findings, dispatches those tasks, merges their changed-file/evidence references into the review context, and re-reviews the original task. The feedback controller requires at least two distinct QA reports before it can return its policy-level `VERIFIED` state. Blocked QA, blocked/failed repair workers, exhausted feedback cycles and the configured repair-round limit stop the loop without a success claim.
+
+Repair tasks inherit the parent's `workspace_group_id`. The trusted workspace factory must map this stable group to the same project checkout so that repair edits are visible to the next QA review. Independent concurrent tasks must still receive isolated worktrees or branches.
+
+**Verification boundary:** the current three-pass supervisor performs model-assisted source inspection and emits static, explicitly non-executed QA checks. The runtime loop does not itself execute the project's test suite. A `VERIFIED` feedback state therefore means the configured source-review cycles found no remaining reported gap; it is not proof that runtime tests passed, nor release approval. Production execution should combine this loop with the sandboxed QA runner and fresh executable evidence before delivery.
+
 ## BRAIN planning and dependency-aware execution
 
 The runtime exposes `plan_and_create_tasks(objective, acceptance_criteria)`. BRAIN asks the configured model to split the request into bounded specialist steps. Deterministic validation rejects unsupported roles, malformed steps, missing acceptance criteria, unknown dependencies, duplicate IDs, and dependency cycles. The validated plan is persisted as individual tasks with explicit prerequisite IDs.
