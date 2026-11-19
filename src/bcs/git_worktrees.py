@@ -181,6 +181,11 @@ class GitWorktreeManager:
             except KeyError as exc:
                 raise GitWorktreeError("Workspace group has no manager-owned worktree.") from exc
 
+    def list_workspaces(self) -> tuple[WorktreeRecord, ...]:
+        """List only worktrees created and recorded by this manager."""
+        with self._lock:
+            return tuple(self._records[key] for key in sorted(self._records))
+
     def status(self, workspace_group_id: str) -> tuple[str, ...]:
         record = self.record_for_group(workspace_group_id)
         result = self._run(["status", "--porcelain", "--untracked-files=all"], cwd=record.path)
