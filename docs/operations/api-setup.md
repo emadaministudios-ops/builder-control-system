@@ -39,6 +39,7 @@ Configure `BCS_API_TOKEN_HASHES` as a JSON array. Example shape (replace the dig
     "scopes": [
       "tasks:read",
       "tasks:create",
+      "tasks:execute",
       "approvals:read",
       "approvals:decide",
       "integrations:read",
@@ -53,6 +54,7 @@ Worker tokens should use `actor_type: "worker"` and only the narrow scopes neede
 Available scopes currently used by the API:
 - `tasks:read`
 - `tasks:create`
+- `tasks:execute` (human principals only)
 - `approvals:read`
 - `approvals:decide`
 - `integrations:read`
@@ -75,13 +77,13 @@ The default bind address is loopback for local development. For cloud hosting, p
 | Method | Route | Authentication |
 |---|---|---|
 | GET | `/health` | Public, minimal status only |
-| POST | `/v1/tasks` | Human principal with `tasks:create` |
+| POST | `/v1/tasks` | Human principal with `tasks:create` |\n| POST | `/v1/plans` | Human principal with `tasks:create` |\n| POST | `/v1/tasks/dispatch` | Human principal with `tasks:execute` |
 | GET | `/v1/tasks` | `tasks:read` |
 | GET | `/v1/approvals` | `approvals:read` |
 | POST | `/v1/approvals/{request_id}/decision` | Human principal with `approvals:decide` |
 | GET | `/v1/feedback/{task_id}` | `tasks:read` |\n| GET | `/v1/integrations` | `integrations:read` |\n| GET | `/v1/integrations/{integration_id}/qa` | `integrations:read` |\n| GET | `/v1/integration-promotions` | `integrations:read` |\n| POST | `/v1/integrations/{integration_id}/promotion-requests` | Human principal with `integrations:promote` |\n| POST | `/v1/integration-promotions/{request_id}/execute` | Human principal with `integrations:promote`, after approval |
 
-The API currently accepts and records top-level tasks but does not yet dispatch them to live model-backed workers. That integration is a later implementation step. SQLite is a development persistence adapter; production multi-user deployment still requires PostgreSQL, hardened identity/token rotation, TLS, rate limiting, backups and operational monitoring.
+When a trusted Git manager and at least one model provider are configured, the app factory registers the standard specialist roles against isolated Git worktrees. A human can submit the task IDs returned by `/v1/plans` to `/v1/tasks/dispatch`; the bounded scheduler runs dependency-ready waves and returns each worker outcome. `BCS_WORKER_MODE` selects `autonomous` (default) or `supervised`; workers only receive workspace read/edit capabilities. If no provider or Git manager is configured, no default workers are registered. SQLite is a development persistence adapter; production multi-user deployment still requires PostgreSQL, hardened identity/token rotation, TLS, rate limiting, backups and operational monitoring.
 
 
 ## 5. Git integration controls
@@ -91,3 +93,12 @@ Promotion routes are disabled unless the API process is constructed with a trust
 A human requests promotion through the promotion-request route. The API creates a fingerprint-bound `release.deploy` approval request; an authorized human then decides it through the approvals decision route. Only after that approval may a human explicitly call the execute route. The executor rechecks QA, commit identity, branch ancestry and worktree cleanliness before a local fast-forward. It does not push to GitHub or deploy an application. `main` is never a target.
 
 The current API setup is a development integration contract, not a complete cloud deployment recipe. Production still needs a hosting entrypoint that constructs and injects the trusted manager, durable shared storage (PostgreSQL is the planned production adapter), persistent Git volumes, TLS, token rotation, rate limiting, backups and monitoring.
+
+
+### Model provider and worker startup
+
+Configure at least one model endpoint before launching the API. For local Ollama's OpenAI-compatible endpoint, set `BCS_OLLAMA_MODEL` and optionally `BCS_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434/v1`). For a cloud OpenAI-compatible endpoint, set `BCS_CLOUD_MODEL`, `BCS_CLOUD_BASE_URL`, and optionally `BCS_CLOUD_API_KEY_ENV` (default `OPENAI_API_KEY`); put the actual API key only in the named environment variable or secret manager. Set `BCS_DEFAULT_PROVIDER` to `ollama` or `cloud` when both are configured. No provider credentials are stored in source control.
+
+Set `BCS_GIT_REPOSITORY_ROOT` to the trusted source checkout and `BCS_GIT_WORKTREE_ROOT` to a persistent directory outside that checkout. The source checkout must already contain the local `development` branch. The manager provisions a separate worktree per task workspace group. The app factory registers nine specialist roles when both the manager and a provider are available. The default worker mode is bounded autonomous file editing; set `BCS_WORKER_MODE=supervised` to require approvals for writes. Model workers cannot execute shell commands, run tests, deploy, or approve releases. QA/test execution remains a separate sandboxed workflow.
+
+Task dispatch is synchronous in this development API: the HTTP request remains open while the selected dependency plan executes. For a production cloud service, move dispatch to a durable background job queue and expose polling/event updates rather than relying on long-running HTTP requests.
