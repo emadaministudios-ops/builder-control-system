@@ -207,6 +207,43 @@ class PersistentApprovalServiceTests(unittest.TestCase):
             self.assertEqual(restored.status, ApprovalStatus.EXPIRED)
             reopened_store.close()
 
+    def test_human_can_cancel_and_cancellation_survives_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "approvals.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            first = ApprovalService(ttl=timedelta(minutes=10), store=store)
+            first.submit(make_request(), now=NOW)
+            cancelled = first.cancel(
+                "approval-1", actor_id="authenticated-human",
+                actor_type=ActorType.HUMAN, reason="No longer needed.",
+                now=NOW + timedelta(seconds=1),
+            )
+            self.assertEqual(cancelled.status, ApprovalStatus.CANCELLED)
+            store.close()
+
+            reopened_store = SQLiteOrchestrationStore(path)
+            second = ApprovalService(store=reopened_store)
+            self.assertEqual(
+                second.get("approval-1", now=NOW + timedelta(seconds=2)),
+                cancelled,
+            )
+            self.assertIsNone(
+                second.policy_approval("approval-1", now=NOW + timedelta(seconds=2))
+            )
+            reopened_store.close()
+
+    def test_worker_cannot_cancel_approval(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "approvals.sqlite3")
+            service = ApprovalService(store=store)
+            service.submit(make_request(), now=NOW)
+            with self.assertRaises(ApprovalError):
+                service.cancel(
+                    "approval-1", actor_id="worker",
+                    actor_type=ActorType.WORKER, now=NOW + timedelta(seconds=1),
+                )
+            store.close()
+
     def test_old_schema_is_migrated_without_losing_tasks(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "legacy.sqlite3"
