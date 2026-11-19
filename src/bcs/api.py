@@ -423,7 +423,14 @@ def create_app(
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "service": "bcs-api"}
+        return {
+            "status": "ok",
+            "service": "bcs-api",
+            "project_workspaces": "ready" if active_git_manager is not None else "disabled",
+            "registered_workers": len(registered_workers),
+            "model_providers": len(active_runtime.providers.provider_ids()),
+            "build_execution": "ready" if execution_handler is not None else "disabled",
+        }
 
     @app.get("/v1/tasks")
     def list_tasks(principal: Principal = Depends(require_principal)):
