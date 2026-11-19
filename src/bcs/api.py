@@ -262,6 +262,10 @@ def create_app(
     app.state.bcs_git_manager = active_git_manager
     app.state.bcs_registered_workers = registered_workers
     app.state.bcs_execution_jobs = active_job_service
+    try:
+        app.state.bcs_qa_profiles = _qa_profiles_from_environment()
+    except RuntimeError as exc:
+        raise RuntimeError("BCS QA profile configuration is invalid.") from exc
 
     def require_principal(request: Request) -> Principal:
         try:
@@ -522,6 +526,63 @@ def create_app(
     def list_integrations(principal: Principal = Depends(require_principal)):
         require_scope(principal, "integrations:read")
         return {"integrations": _json_value(active_runtime.integration_history())}
+
+    @app.post("/v1/integrations/{integration_id}/qa", status_code=status.HTTP_201_CREATED)
+    def execute_integration_qa(
+        integration_id: str,
+        payload: IntegrationQAInput,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "qa:execute")
+        if principal.actor_type.value != "human":
+            raise HTTPException(status_code=403, detail="Only an authenticated human may start integration QA.")
+        manager = app.state.bcs_git_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Trusted Git worktrees are not configured.")
+        profiles = app.state.bcs_qa_profiles
+        profile = profiles.get(payload.profile_id)
+        if profile is None:
+            raise HTTPException(status_code=404, detail="QA profile not found or not configured.")
+        image = os.environ.get("BCS_QA_DOCKER_IMAGE", "").strip()
+        allowed_images = frozenset(
+            item.strip() for item in os.environ.get("BCS_QA_ALLOWED_IMAGES", "").split(",")
+            if item.strip()
+        )
+        if not image or image not in allowed_images:
+            raise HTTPException(status_code=503, detail="An allowlisted BCS QA Docker image is not configured.")
+        mode_name = os.environ.get("BCS_QA_MODE", os.environ.get("BCS_WORKER_MODE", "autonomous")).strip().lower()
+        try:
+            qa_mode = OperatingMode(mode_name)
+        except ValueError as exc:
+            raise HTTPException(status_code=503, detail="BCS_QA_MODE must be supervised or autonomous.") from exc
+        from .qa_runner import QACheckSpec
+        checks = tuple(
+            QACheckSpec(
+                check_id=item["check_id"],
+                name=item["name"],
+                request_id="qa-request-" + uuid4().hex,
+                argv=item["argv"],
+            )
+            for item in profile
+        )
+        try:
+            report = active_runtime.run_integration_qa(
+                manager=manager,
+                integration_id=integration_id,
+                checks=checks,
+                docker_executable=os.environ.get("BCS_DOCKER_EXECUTABLE", "docker"),
+                image=image,
+                allowed_images=allowed_images,
+                mode=qa_mode,
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Integration not found.") from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "assessment": _json_value(asdict(report)),
+            "integration_qa": _json_value(active_runtime.integration_qa_history(integration_id)[-1]),
+        }
 
     @app.get("/v1/integrations/{integration_id}/qa")
     def list_integration_qa(
