@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 
 
 class StorageError(RuntimeError):
@@ -139,6 +139,17 @@ class SQLiteOrchestrationStore:
                             task_id TEXT NOT NULL,
                             created_at TEXT NOT NULL,
                             payload TEXT NOT NULL CHECK (json_valid(payload))
+                        )
+                    """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS consultation_outcomes (
+                            outcome_id TEXT PRIMARY KEY,
+                            consultation_id TEXT NOT NULL,
+                            task_id TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            payload TEXT NOT NULL CHECK (json_valid(payload)),
+                            FOREIGN KEY (consultation_id)
+                                REFERENCES specialist_consultations(consultation_id)
                         )
                     """)
                     self._connection.execute(
@@ -523,6 +534,71 @@ class SQLiteOrchestrationStore:
                     (task_id,),
                 ).fetchall()
         return tuple(self._decode_consultation(row["payload"]) for row in rows)
+
+
+    @staticmethod
+    def _consultation_outcome_payload(record) -> dict:
+        return {
+            "version": 1, "outcome_id": record.outcome_id,
+            "consultation_id": record.consultation_id, "task_id": record.task_id,
+            "disposition": record.disposition, "worker_reason": record.worker_reason,
+            "qa_status": record.qa_status, "qa_run_id": record.qa_run_id,
+            "evidence_refs": list(record.evidence_refs),
+            "created_at": SQLiteOrchestrationStore._timestamp(record.created_at),
+        }
+
+    @staticmethod
+    def _decode_consultation_outcome(payload: str):
+        from .consultation_feedback import ConsultationOutcome
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported consultation outcome version.")
+            created = datetime.fromisoformat(data["created_at"])
+            if created.tzinfo is None:
+                raise ValueError("Naive consultation outcome timestamp is not accepted.")
+            return ConsultationOutcome(
+                outcome_id=data["outcome_id"], consultation_id=data["consultation_id"],
+                task_id=data["task_id"], disposition=data["disposition"],
+                worker_reason=data["worker_reason"], qa_status=data["qa_status"],
+                qa_run_id=data["qa_run_id"], evidence_refs=tuple(data["evidence_refs"]),
+                created_at=created,
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StorageError("Stored consultation outcome is invalid or unsupported.") from exc
+
+    def save_consultation_outcome(self, record) -> None:
+        from .consultation_feedback import ConsultationOutcome
+        if not isinstance(record, ConsultationOutcome):
+            raise TypeError("A validated ConsultationOutcome is required.")
+        payload = self._consultation_outcome_payload(record)
+        encoded = self._json(payload)
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute("""
+                        INSERT INTO consultation_outcomes
+                            (outcome_id, consultation_id, task_id, created_at, payload)
+                        VALUES (?, ?, ?, ?, ?)
+                    """, (record.outcome_id, record.consultation_id, record.task_id,
+                          payload["created_at"], encoded))
+            except sqlite3.IntegrityError as exc:
+                raise StorageError("Consultation outcome already exists or references an unknown consultation.") from exc
+            except sqlite3.Error as exc:
+                raise StorageError("Could not commit consultation outcome.") from exc
+
+    def list_consultation_outcomes(self, task_id: str | None = None):
+        with self._lock:
+            if task_id is None:
+                rows = self._connection.execute(
+                    "SELECT payload FROM consultation_outcomes ORDER BY created_at, outcome_id"
+                ).fetchall()
+            else:
+                rows = self._connection.execute(
+                    "SELECT payload FROM consultation_outcomes WHERE task_id = ? ORDER BY created_at, outcome_id",
+                    (task_id,),
+                ).fetchall()
+        return tuple(self._decode_consultation_outcome(row["payload"]) for row in rows)
 
     def save_task(self, record: "TaskRecord") -> None:
         self.save_state((record,), ())
