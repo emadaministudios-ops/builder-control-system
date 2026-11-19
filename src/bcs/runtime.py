@@ -16,6 +16,7 @@ from .agents import ModelWorker
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
+from .scheduler import TaskScheduler
 from .orchestrator import Orchestrator, WorkerTask
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
@@ -30,6 +31,7 @@ class BCSRuntime:
     approvals: ApprovalService
     feedback: FeedbackController
     providers: ProviderRegistry
+    scheduler: TaskScheduler
 
     def register_model_worker(
         self,
@@ -97,6 +99,7 @@ def create_runtime(
     *,
     approval_ttl_seconds: int = 900,
     max_attempts: int = 2,
+    max_concurrency: int = 2,
     provider_configs: tuple[ProviderConfig, ...] | None = None,
     default_provider_id: str | None = None,
 ) -> BCSRuntime:
@@ -139,12 +142,14 @@ def create_runtime(
             ttl=timedelta(seconds=approval_ttl_seconds), store=store
         )
         feedback = FeedbackController(store=store)
+        scheduler = TaskScheduler(orchestrator, max_concurrency=max_concurrency)
         return BCSRuntime(
             store=store,
             orchestrator=orchestrator,
             approvals=approvals,
             feedback=feedback,
             providers=providers,
+            scheduler=scheduler,
         )
     except Exception:
         store.close()
