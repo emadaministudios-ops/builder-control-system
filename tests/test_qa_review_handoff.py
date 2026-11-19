@@ -48,7 +48,7 @@ class QAReviewHandoffTests(unittest.TestCase):
             self.assertEqual(len(repair_ids), 1)
             repair = runtime.orchestrator.get_task(repair_ids[0])
             self.assertEqual(repair.task.role, "frontend-developer")
-            self.assertIn("frontend modal state", repair.task.objective)
+            self.assertIn("Frontend modal state", repair.task.objective)
             self.assertFalse(report.checks[0].executed)
         finally:
             runtime.close()
