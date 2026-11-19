@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bcs.consultation import ConsultationError, SpecialistConsultant
+from bcs.consultation import (ConsultationError, SpecialistConsultant, ConsultationRouter)
 from bcs.providers import ProviderResponse
 
 
@@ -43,6 +43,45 @@ class SpecialistConsultationTests(unittest.TestCase):
                 objective="Do something", question="Can you help?",
             )
         self.assertEqual(providers.calls, [])
+
+    def test_brain_routes_to_one_allowlisted_specialist(self):
+        providers = FakeProviders(
+            '{"should_consult":true,"specialist_role":"architect",'
+            '"question":"Which boundary should own this integration?",'
+            '"reason":"The worker identified an architectural dependency."}'
+        )
+        route = ConsultationRouter(providers=providers).route(
+            task_role="frontend-developer", objective="Integrate auth",
+            acceptance_criteria=("Token refresh works.",),
+            worker_summary="The UI needs a stable token refresh boundary.",
+            blockers=("Unclear ownership of refresh logic.",),
+        )
+        self.assertTrue(route.should_consult)
+        self.assertEqual(route.specialist_role, "architect")
+
+    def test_brain_can_skip_unnecessary_consultation(self):
+        providers = FakeProviders(
+            '{"should_consult":false,"specialist_role":null,'
+            '"question":"","reason":"The worker has enough information."}'
+        )
+        route = ConsultationRouter(providers=providers).route(
+            task_role="frontend-developer", objective="Adjust button spacing",
+            acceptance_criteria=("Spacing matches design.",),
+            worker_summary="Routine CSS adjustment is complete.",
+        )
+        self.assertFalse(route.should_consult)
+        self.assertIsNone(route.specialist_role)
+
+    def test_brain_cannot_route_to_unsupported_specialist(self):
+        router = ConsultationRouter(providers=FakeProviders(
+            '{"should_consult":true,"specialist_role":"root-admin",'
+            '"question":"Help?","reason":"Need access."}'
+        ))
+        with self.assertRaises(ConsultationError):
+            router.route(
+                task_role="frontend-developer", objective="Build UI",
+                acceptance_criteria=("UI works.",), worker_summary="Blocked.",
+            )
 
     def test_enforces_per_consultant_call_limit(self):
         providers = FakeProviders(
