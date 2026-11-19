@@ -26,7 +26,7 @@ class WorkspaceLeaseManager:
         if not canonical.is_dir():
             raise ValueError("Workspace lease root must be a directory.")
         with self._guard:
-            return self._leases.setdefault(canonical, threading.RLock())
+            return self._leases.setdefault(canonical, threading.Lock())
 
     @contextmanager
     def lease(self, root: str | Path):
