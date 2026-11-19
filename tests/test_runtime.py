@@ -17,9 +17,9 @@ from bcs.qa_runner import QACheckSpec
 from bcs.workspace import Workspace
 from bcs.policy import OperatingMode
 from bcs.runtime import create_runtime
-from bcs.consultation import ConsultationRecord
+from bcs.consultation import ConsultationRecord, ConsultationRoute, SpecialistAdvice
 from bcs.consultation_feedback import ConsultationOutcome
-from bcs.providers import ProviderConfig, ProviderError
+from bcs.providers import ProviderConfig, ProviderError, ProviderResponse
 
 
 class RuntimeCompositionTests(unittest.TestCase):
@@ -238,6 +238,56 @@ class RuntimeCompositionTests(unittest.TestCase):
                 evidence_refs=(), workspace_group_id="different-project",
             )
             self.assertEqual(runtime.consultation_cautions_for_task(unrelated), "")
+
+    def test_registered_worker_automatically_records_consultation_adoption(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "src").mkdir()
+            with create_runtime(":memory:") as runtime:
+                task = runtime.orchestrator.create_task(
+                    task_id="auto-worker-task", objective="Implement an API adapter.",
+                    acceptance_criteria=["Adapter is implemented."],
+                    role="backend-developer",
+                )
+                class FakeProviders:
+                    def complete(self, messages, **kwargs):
+                        return ProviderResponse(
+                            "fake", "fake-model",
+                            '{"summary":"Implemented adapter","edits":['
+                            '{"path":"src/adapter.py","content":"class Adapter: pass\\n"}],'
+                            '"blockers":[],"consultation_disposition":"followed",'
+                            '"consultation_reason":"Used the adapter boundary recommendation."}',
+                        )
+                runtime.providers = FakeProviders()
+
+                def fake_consult(task_id, **kwargs):
+                    record = ConsultationRecord(
+                        consultation_id="auto-consultation", task_id=task_id,
+                        requesting_role="backend-developer", should_consult=True,
+                        specialist_role="architect", question="Where should adapter live?",
+                        reason="Boundary needs design input.", advice="Keep adapter in backend.",
+                        risks=(), next_steps=("Add backend adapter.",), confidence="high",
+                        created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+                    )
+                    runtime.store.save_consultation(record)
+                    return (
+                        ConsultationRoute(True, "architect", "Where should adapter live?", "Boundary risk."),
+                        SpecialistAdvice(
+                            "backend-developer", "architect", "Where should adapter live?",
+                            "Keep adapter in backend.", (), ("Add backend adapter.",), "high",
+                        ),
+                    )
+                runtime.consult_for_task = fake_consult
+                runtime.register_model_worker(
+                    worker_id="backend-worker", role="backend-developer",
+                    workspace_factory=lambda item: Workspace("workspace-" + item.task_id, root),
+                )
+                outcome = runtime.orchestrator.dispatch(task.task.task_id)
+                self.assertEqual(outcome.state, TaskState.COMPLETED)
+                history = runtime.consultation_outcome_history(task.task.task_id)
+                self.assertEqual(len(history), 1)
+                self.assertEqual(history[0].disposition, "followed")
+                self.assertIn("adapter boundary recommendation", history[0].worker_reason)
 
     def test_qa_report_automatically_assesses_consultation_outcome(self):
         with create_runtime(":memory:") as runtime:
