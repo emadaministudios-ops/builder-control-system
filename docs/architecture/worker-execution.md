@@ -68,6 +68,12 @@ The worker:
 
 Current limitation: the worker does not yet have a complete iterative tool loop for reading arbitrary project context, running tests, receiving QA findings and repairing automatically. It currently accepts structured file-edit proposals. Do not interpret a model response as proof that code works.
 
+## Controller-managed Git worktrees
+
+A controller-owned `GitWorktreeManager` provides the trusted workspace factory needed by model workers. Construct it with an explicit repository root and a worktree storage directory outside that repository, then pass `manager.workspace_for_task` as the trusted `workspace_factory` to `register_model_worker`. It creates isolated directories and dedicated branches from `development`, keyed by stable workspace group IDs. QA repair tasks therefore return to the original project's worktree, while unrelated project groups get separate worktrees. The runtime lease serializes tasks that share a physical checkout.
+
+The manager exposes status, changed-file and diff inspection. It refuses cleanup of dirty worktrees and never commits, merges, pushes or promotes changes. Its registry is currently process-local/in-memory; restart reconciliation and distributed multi-process allocation remain follow-up work. Git worktree integration is tested against temporary repositories in CI, not against a live user project.
+
 ## Bounded parallel scheduling
 
 `runtime.scheduler.dispatch_independent(task_ids)` dispatches a caller-selected batch concurrently up to the configured `max_concurrency` ceiling. The default is two.
