@@ -197,6 +197,8 @@ class SQLiteOrchestrationStore:
                 "changed_files": list(result.changed_files),
                 "evidence_refs": list(result.evidence_refs),
                 "blockers": list(result.blockers),
+                "consultation_disposition": result.consultation_disposition,
+                "consultation_reason": result.consultation_reason,
             },
             "created_at": SQLiteOrchestrationStore._timestamp(record.created_at),
             "updated_at": SQLiteOrchestrationStore._timestamp(record.updated_at),
@@ -244,6 +246,8 @@ class SQLiteOrchestrationStore:
                 changed_files=tuple(raw_result["changed_files"]),
                 evidence_refs=tuple(raw_result["evidence_refs"]),
                 blockers=tuple(raw_result["blockers"]),
+                consultation_disposition=raw_result.get("consultation_disposition", "unknown"),
+                consultation_reason=raw_result.get("consultation_reason", ""),
             )
             created = datetime.fromisoformat(data["created_at"])
             updated = datetime.fromisoformat(data["updated_at"])
