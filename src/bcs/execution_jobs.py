@@ -119,7 +119,8 @@ class ExecutionJobService:
                 for item in outcomes
             )
             state = "completed" if fully_completed == len(outcomes) else (
-                "partial" if worker_completed else "failed"
+                "partial" if worker_completed and job.get("job_type", "tasks") == "tasks"
+                else "failed"
             )
             self.store.complete_execution_job(
                 job_id=job["job_id"], worker_id=self.worker_id,
