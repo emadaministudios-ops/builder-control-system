@@ -10,6 +10,9 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 import json
+import uuid
+
+from .qa import EvidenceStore, QAReport, QAReportBuilder
 
 from .orchestrator import WorkerResult, WorkerResultStatus, WorkerTask
 from .providers import ProviderError, ProviderRegistry
@@ -271,6 +274,45 @@ class QASupervisor:
         )
 
 
+
+def build_qa_report(review: QAReview, evidence_store: EvidenceStore) -> QAReport:
+    """Convert a completed model review into explicitly non-executed QA checks."""
+    if not isinstance(review, QAReview) or not isinstance(evidence_store, EvidenceStore):
+        raise TypeError("A QAReview and EvidenceStore are required.")
+    if review.status == ReviewStatus.BLOCKED:
+        raise ValueError("A blocked review cannot be represented as completed QA.")
+    builder = QAReportBuilder(
+        task_id=review.task_id,
+        qa_run_id="model-qa-" + uuid.uuid4().hex,
+        evidence_store=evidence_store,
+    )
+    findings_by_requirement = {}
+    for finding in review.findings:
+        findings_by_requirement.setdefault(finding.requirement_id, []).append(finding)
+    for index, (requirement_id, criterion) in enumerate(review.requirements, start=1):
+        findings = findings_by_requirement.get(requirement_id, [])
+        if findings:
+            details = " | ".join(
+                f"{item.severity}: {item.issue} Expected: {item.expected} "
+                f"Observed: {item.observed} Suggested fix: {item.suggestion}"
+                for item in findings
+            )
+        else:
+            details = "No source-level gap identified by the three-pass model-assisted review."
+        builder.add_static_check(
+            check_id=f"model-review-{index}",
+            name=f"Requirement {requirement_id}",
+            passed=not findings,
+            details=details,
+            basis=(
+                "Three-pass model-assisted source review only; this is not an executed "
+                "test, runtime verification, or release approval."
+            ),
+        )
+    return builder.build()
+
+
 __all__ = [
     "ReviewStatus", "ReviewFinding", "QAReview", "QASupervisor",
+    "build_qa_report",
 ]
