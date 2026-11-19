@@ -62,6 +62,8 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
             workspace_group_ids=[record.task.workspace_group_id],
         )
         self.assertEqual("awaiting_qa", result.status)
+        self.assertRegex(result.commit_sha, r"^[0-9a-f]{40,64}$")
+        self.assertEqual(result.commit_sha, git(result.path, "rev-parse", "HEAD"))
         self.assertTrue((result.path / "feature.py").exists())
 
     def test_integration_history_survives_runtime_restart(self):
@@ -92,6 +94,7 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
         self.assertEqual(result.branch, history[0]["branch"])
         self.assertIn(record.task.workspace_group_id, history[0]["included_groups"])
         self.assertEqual("awaiting_qa", history[0]["status"])
+        self.assertEqual(result.commit_sha, history[0]["commit_sha"])
 
     def test_runtime_blocks_queued_or_failed_groups(self):
         record = self.runtime.orchestrator.create_task(
