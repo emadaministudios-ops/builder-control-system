@@ -1,0 +1,34 @@
+name: Policy tests
+
+on:
+  push:
+    branches:
+      - development
+    paths:
+      - "src/bcs/**"
+      - "tests/**"
+      - ".github/workflows/policy-tests.yml"
+  pull_request:
+    branches:
+      - main
+      - development
+    paths:
+      - "src/bcs/**"
+      - "tests/**"
+      - ".github/workflows/policy-tests.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run policy unit tests
+        run: python -m unittest discover -s tests -v
