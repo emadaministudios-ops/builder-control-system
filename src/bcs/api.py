@@ -201,6 +201,7 @@ def _git_manager_from_environment():
     if configured_repository:
         repository_root = Path(configured_repository)
         worktree_root = Path(configured_worktrees)
+        _bootstrap_persistent_project_repository(repository_root)
     else:
         volume_root = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/data"))
         if not volume_root.is_dir():
