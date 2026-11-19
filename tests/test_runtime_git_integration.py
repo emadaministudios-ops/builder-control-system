@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bcs.git_worktrees import GitWorktreeManager
+from bcs.approvals import ActorType, ApprovalError
 from bcs.qa import EvidenceStore, QAReportBuilder
 from bcs.qa_runner import QACheckSpec
 from bcs.sandbox_executor import ExecutionResult
@@ -178,6 +179,75 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
                     docker_executable="docker", image="bcs-test:latest",
                     allowed_images=frozenset({"bcs-test:latest"}),
                 )
+    def test_promotion_requires_human_approval_and_only_fast_forwards_development(self):
+        _, integration = self._completed_integration("promote-task", "promote-integration")
+        executor = Mock()
+        executor.execute.return_value = ExecutionResult(
+            "completed", "Tests passed", exit_code=0, stdout="all green"
+        )
+        with patch("bcs.runtime.DockerSandboxExecutor", return_value=executor):
+            self.runtime.run_integration_qa(
+                manager=self.manager, integration_id=integration.integration_id,
+                checks=(QACheckSpec("unit", "Unit tests", "promote-qa", ("python", "-m", "unittest")),),
+                docker_executable="docker", image="bcs-test:latest",
+                allowed_images=frozenset({"bcs-test:latest"}),
+            )
+        approval = self.runtime.request_integration_promotion(
+            manager=self.manager, integration_id=integration.integration_id,
+        )
+        self.assertEqual("pending", approval.status.value)
+        with self.assertRaisesRegex(ValueError, "human-approved"):
+            self.runtime.promote_integration(manager=self.manager, request_id=approval.request_id)
+        with self.assertRaises(ApprovalError):
+            self.runtime.approvals.decide(
+                approval.request_id, actor_id="worker", actor_type=ActorType.WORKER,
+                approved=True,
+            )
+        self.runtime.approvals.decide(
+            approval.request_id, actor_id="human-reviewer", actor_type=ActorType.HUMAN,
+            approved=True, reason="Reviewed the exact QA-passed commit.",
+        )
+        promoted = self.runtime.promote_integration(
+            manager=self.manager, request_id=approval.request_id,
+        )
+        self.assertEqual("promoted", promoted["status"])
+        self.assertEqual("human-reviewer", promoted["promoted_by"])
+        self.assertEqual(integration.commit_sha, git(self.repo, "rev-parse", "HEAD"))
+        self.assertEqual("development", git(self.repo, "branch", "--show-current"))
+        self.assertNotIn("main", git(self.repo, "branch", "--list").splitlines())
+
+    def test_promotion_rejects_main_and_requires_latest_qa_pass(self):
+        _, integration = self._completed_integration("reject-promotion", "reject-integration")
+        with self.assertRaisesRegex(ValueError, "development branch"):
+            self.runtime.request_integration_promotion(
+                manager=self.manager, integration_id=integration.integration_id,
+                target_branch="main",
+            )
+        with self.assertRaisesRegex(ValueError, "executed QA assessment"):
+            self.runtime.request_integration_promotion(
+                manager=self.manager, integration_id=integration.integration_id,
+            )
+
+    def test_promotion_request_survives_runtime_restart(self):
+        _, integration = self._completed_integration("restart-promotion", "restart-integration")
+        executor = Mock()
+        executor.execute.return_value = ExecutionResult(
+            "completed", "Tests passed", exit_code=0, stdout="ok"
+        )
+        with patch("bcs.runtime.DockerSandboxExecutor", return_value=executor):
+            self.runtime.run_integration_qa(
+                manager=self.manager, integration_id=integration.integration_id,
+                checks=(QACheckSpec("unit", "Unit", "restart-qa", ("pytest",)),),
+                docker_executable="docker", image="bcs-test:latest",
+                allowed_images=frozenset({"bcs-test:latest"}),
+            )
+        approval = self.runtime.request_integration_promotion(
+            manager=self.manager, integration_id=integration.integration_id,
+        )
+        self.runtime.close()
+        self.runtime = create_runtime(self.base / "bcs.sqlite3")
+        self.assertIsNotNone(self.runtime.store.get_integration_promotion_request(approval.request_id))
+        self.assertEqual("pending", self.runtime.approvals.get(approval.request_id).status.value)
     def test_runtime_blocks_queued_or_failed_groups(self):
         record = self.runtime.orchestrator.create_task(
             task_id="not-ready", objective="Build pending feature",
