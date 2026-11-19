@@ -145,6 +145,51 @@ class ApprovalService:
             self._records[request_id] = updated
             return updated
 
+    def cancel(
+        self,
+        request_id: str,
+        *,
+        actor_id: str,
+        actor_type: ActorType,
+        reason: str = "",
+        now: datetime | None = None,
+    ) -> ApprovalRequest:
+        """Cancel a pending request; only an authenticated human may cancel it."""
+        if actor_type != ActorType.HUMAN:
+            raise ApprovalError("Only an authenticated human may cancel an approval.")
+        if not isinstance(actor_id, str) or not actor_id.strip():
+            raise ApprovalError("Cancelling actor identity is required.")
+        cancelled_at = now or datetime.now(timezone.utc)
+        if cancelled_at.tzinfo is None:
+            raise ApprovalError("Approval timestamps must include a timezone.")
+        with self._lock:
+            record = self._records.get(request_id)
+            if record is None:
+                raise ApprovalError("Approval request does not exist.")
+            if record.status != ApprovalStatus.PENDING:
+                raise ApprovalError("Only pending approval requests can be cancelled.")
+            if record.expires_at <= cancelled_at:
+                expired = ApprovalRequest(
+                    **{**record.__dict__, "status": ApprovalStatus.EXPIRED}
+                )
+                if self._store is not None:
+                    self._store.save_approval(expired)
+                self._records[request_id] = expired
+                raise ApprovalError("Approval request has expired.")
+            cancelled = ApprovalRequest(
+                **{
+                    **record.__dict__,
+                    "status": ApprovalStatus.CANCELLED,
+                    "decided_at": cancelled_at,
+                    "decided_by": actor_id,
+                    "reason": reason.strip() or "Cancelled by human approver.",
+                }
+            )
+            if self._store is not None:
+                self._store.save_approval(cancelled)
+            self._records[request_id] = cancelled
+            return cancelled
+
     def get(self, request_id: str, *, now: datetime | None = None) -> ApprovalRequest | None:
         current_time = now or datetime.now(timezone.utc)
         if current_time.tzinfo is None:
