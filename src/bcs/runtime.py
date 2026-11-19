@@ -236,9 +236,16 @@ class BCSRuntime:
             if previous is None or outcome.created_at > previous.created_at:
                 latest[outcome.consultation_id] = outcome
         rows = []
-        for consultation_id, outcome in latest.items():
-            consultation = by_id.get(consultation_id)
-            if consultation is None or not consultation.should_consult:
+        for consultation in consultations:
+            if not consultation.should_consult:
+                rows.append((
+                    consultation.created_at,
+                    "Consultation=skipped; requesting_role=" + consultation.requesting_role
+                    + "; reason=" + consultation.reason[:500]
+                ))
+                continue
+            outcome = latest.get(consultation.consultation_id)
+            if outcome is None:
                 continue
             rows.append(
                 (outcome.created_at,
