@@ -20,6 +20,7 @@ from .auth import (
     AuthenticationError, Principal, TokenAuthenticator,
 )
 from .runtime import BCSRuntime, create_runtime
+from .execution_jobs import ExecutionJobService
 from .policy import OperatingMode
 
 
@@ -163,6 +164,7 @@ def create_app(
     runtime: BCSRuntime | None = None,
     authenticator: TokenAuthenticator | None = None,
     git_manager=None,
+    execution_job_service: ExecutionJobService | None = None,
 ) -> FastAPI:
     """Create the BCS API with injected or environment-configured services."""
     owns_runtime = runtime is None
@@ -170,12 +172,19 @@ def create_app(
     active_authenticator = authenticator or TokenAuthenticator.from_environment()
     active_git_manager = git_manager if git_manager is not None else _git_manager_from_environment()
     registered_workers = _register_default_workers(active_runtime, active_git_manager)
+    active_job_service = execution_job_service or ExecutionJobService(
+        active_runtime.store, active_runtime.scheduler
+    )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        yield
-        if owns_runtime:
-            active_runtime.close()
+        active_job_service.start()
+        try:
+            yield
+        finally:
+            active_job_service.stop(timeout=10)
+            if owns_runtime:
+                active_runtime.close()
 
     app = FastAPI(
         title="Builder Control System API",
@@ -188,6 +197,7 @@ def create_app(
     # The Git manager is trusted server configuration; clients cannot supply paths or repositories.
     app.state.bcs_git_manager = active_git_manager
     app.state.bcs_registered_workers = registered_workers
+    app.state.bcs_execution_jobs = active_job_service
 
     def require_principal(request: Request) -> Principal:
         try:
@@ -296,25 +306,38 @@ def create_app(
             "tasks": [_task_view(record) for record in records],
         }
 
-    @app.post("/v1/tasks/dispatch")
+    @app.post("/v1/tasks/dispatch", status_code=status.HTTP_202_ACCEPTED)
     def dispatch_tasks(
         payload: TaskDispatchInput,
         principal: Principal = Depends(require_principal),
     ):
         require_scope(principal, "tasks:execute")
         if principal.actor_type.value != "human":
-            raise HTTPException(status_code=403, detail="Only an authenticated human may start task execution.")
+            raise HTTPException(status_code=403, detail="Only an authenticated human may enqueue task execution.")
         try:
-            result = active_runtime.scheduler.dispatch_plan(payload.task_ids)
+            for task_id in payload.task_ids:
+                if active_runtime.orchestrator.get_task(task_id) is None:
+                    raise KeyError(task_id)
+            job = active_job_service.enqueue(payload.task_ids, principal.actor_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="A submitted task does not exist.") from exc
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
-        return {
-            "requested": result.requested,
-            "concurrency_limit": result.concurrency_limit,
-            "outcomes": [_dispatch_view(item) for item in result.outcomes],
-        }
+        return {"job": _json_value(job), "status_url": f"/v1/execution-jobs/{job['job_id']}"}
+
+    @app.get("/v1/execution-jobs")
+    def list_execution_jobs(principal: Principal = Depends(require_principal)):
+        require_scope(principal, "tasks:read")
+        jobs = active_runtime.store.list_execution_jobs(requested_by=principal.actor_id)
+        return {"jobs": _json_value(jobs)}
+
+    @app.get("/v1/execution-jobs/{job_id}")
+    def get_execution_job(job_id: str, principal: Principal = Depends(require_principal)):
+        require_scope(principal, "tasks:read")
+        job = active_runtime.store.get_execution_job(job_id)
+        if job is None or job["requested_by"] != principal.actor_id:
+            raise HTTPException(status_code=404, detail="Execution job not found.")
+        return {"job": _json_value(job)}
 
     @app.get("/v1/approvals")
     def list_approvals(principal: Principal = Depends(require_principal)):
