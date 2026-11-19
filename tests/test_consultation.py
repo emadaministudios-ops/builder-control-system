@@ -1,4 +1,5 @@
 """Tests for bounded advisory specialist consultation."""
+import json
 import sys
 import unittest
 from pathlib import Path
