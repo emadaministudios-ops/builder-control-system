@@ -490,7 +490,9 @@ class BCSRuntime:
             worker_id=worker_id,
             limits=limits,
         )
-        return runner.run(task_id=task.task_id, checks=checks)
+        report = runner.run(task_id=task.task_id, checks=checks)
+        self._record_qa_consultation_assessments(report)
+        return report
 
     def review_and_handoff(
         self, task: WorkerTask, result, supervisor: QASupervisor,
