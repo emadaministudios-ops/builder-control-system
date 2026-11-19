@@ -42,7 +42,7 @@ class Workspace:
         if "\x00" in relative_path:
             raise WorkspaceError("NUL bytes are not allowed in paths.")
 
-        normalized = relative_path.replace("\\\\", "/")
+        normalized = relative_path.replace("\\", "/")
         if normalized.startswith(("/", "~")) or re.match(r"^[A-Za-z]:", normalized):
             raise WorkspaceError("Absolute paths are not allowed.")
         parts = normalized.split("/")
