@@ -35,10 +35,13 @@ class ExecutionJobService:
         self._thread = None
 
     def enqueue(self, task_ids, requested_by):
+        return self.enqueue_workflow("tasks", task_ids, requested_by)
+
+    def enqueue_workflow(self, job_type, task_ids, requested_by, *, metadata=None):
         job_id = "job_" + uuid4().hex
         job = self.store.enqueue_execution_job(
             job_id=job_id, task_ids=tuple(task_ids), requested_by=requested_by,
-            now=datetime.now(timezone.utc),
+            now=datetime.now(timezone.utc), job_type=job_type, metadata=metadata or {},
         )
         self.start()
         return job
