@@ -2,13 +2,14 @@
 import hashlib
 import sys
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bcs.api import create_app
+from bcs.api import create_app, _git_manager_from_environment
 from bcs.approvals import ActorType
 from bcs.auth import Principal, TokenAuthenticator
 from bcs.policy import ToolRequest
@@ -132,6 +133,17 @@ class BCSAPITests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.human_token}"},
         )
         self.assertEqual(human_without_manager.status_code, 503)
+
+    def test_git_manager_requires_both_operator_configured_paths(self):
+        with patch.dict(
+            "os.environ",
+            {"BCS_GIT_REPOSITORY_ROOT": "/tmp/repo"},
+            clear=True,
+        ):
+            with self.assertRaises(RuntimeError):
+                _git_manager_from_environment()
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsNone(_git_manager_from_environment())
 
     def test_decision_body_rejects_unrecognized_fields(self):
         response = self.client.post(
