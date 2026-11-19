@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from bcs.api import create_app, _git_manager_from_environment
+from bcs.api import create_app, _git_manager_from_environment, _qa_profiles_from_environment
 from bcs.approvals import ActorType
 from bcs.orchestrator import WorkerResult, WorkerResultStatus
 from bcs.auth import Principal, TokenAuthenticator
@@ -28,11 +28,11 @@ class BCSAPITests(unittest.TestCase):
         self.worker_token = "worker-test-secret"
         self.human = Principal(
             "owner-configured", ActorType.HUMAN,
-            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote", "tasks:execute"}),
+            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote", "tasks:execute", "qa:execute"}),
         )
         self.worker = Principal(
             "worker-configured", ActorType.WORKER,
-            frozenset({"tasks:read", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote", "tasks:execute"}),
+            frozenset({"tasks:read", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote", "tasks:execute", "qa:execute"}),
         )
         auth = TokenAuthenticator({
             hashlib.sha256(self.human_token.encode()).hexdigest(): self.human,
@@ -236,6 +236,75 @@ class BCSAPITests(unittest.TestCase):
                 headers={"Authorization": f"Bearer {self.human_token}"},
             )
         self.assertEqual(status_response.json()["job"]["state"], "completed")
+
+
+    def test_human_can_run_server_profiled_integration_qa(self):
+        from bcs.qa import QAReportBuilder
+        profile_json = (
+            '{"python-unit":[{"check_id":"unit","name":"Python unit tests",'
+            '"argv":["python","-m","unittest","discover","-s","tests"]}]}'
+        )
+        env = {
+            "BCS_QA_PROFILES_JSON": profile_json,
+            "BCS_QA_ALLOWED_EXECUTABLES": "python,pytest",
+            "BCS_QA_DOCKER_IMAGE": "bcs-qa:stable",
+            "BCS_QA_ALLOWED_IMAGES": "bcs-qa:stable",
+        }
+        with patch.dict("os.environ", env, clear=False):
+            app = create_app(
+                runtime=self.runtime, authenticator=self.client.app.state.bcs_authenticator,
+                git_manager=object(),
+            )
+        builder = QAReportBuilder(
+            task_id="qa-task", qa_run_id="qa-run",
+            evidence_store=self.runtime.evidence_store,
+        )
+        builder.add_static_check(
+            check_id="source", name="Source review", passed=True,
+            details="Reviewed.", basis="Static-only test fixture.",
+        )
+        report = builder.build()
+        with patch.object(self.runtime, "run_integration_qa", return_value=report) as run_qa, \
+             patch.object(self.runtime, "integration_qa_history", return_value=[{"integration_id": "integration-a", "status": "not_assessed"}]):
+            client = TestClient(app)
+            response = client.post(
+                "/v1/integrations/integration-a/qa",
+                headers={"Authorization": f"Bearer {self.human_token}"},
+                json={"profile_id": "python-unit"},
+            )
+            self.assertEqual(response.status_code, 201)
+            self.assertEqual(response.json()["assessment"]["status"], "passed")
+            check = run_qa.call_args.kwargs["checks"][0]
+            self.assertEqual(check.argv, ("python", "-m", "unittest", "discover", "-s", "tests"))
+            client.close()
+
+    def test_worker_cannot_start_integration_qa_even_with_scope(self):
+        with patch.dict("os.environ", {
+            "BCS_QA_PROFILES_JSON": '{"tests":[{"check_id":"unit","name":"Unit","argv":["pytest"]}]}',
+            "BCS_QA_ALLOWED_EXECUTABLES": "pytest",
+            "BCS_QA_DOCKER_IMAGE": "bcs-qa:stable",
+            "BCS_QA_ALLOWED_IMAGES": "bcs-qa:stable",
+        }, clear=False):
+            app = create_app(
+                runtime=self.runtime, authenticator=self.client.app.state.bcs_authenticator,
+                git_manager=object(),
+            )
+        client = TestClient(app)
+        response = client.post(
+            "/v1/integrations/integration-a/qa",
+            headers={"Authorization": f"Bearer {self.worker_token}"},
+            json={"profile_id": "tests"},
+        )
+        self.assertEqual(response.status_code, 403)
+        client.close()
+
+    def test_qa_profile_rejects_unapproved_executable(self):
+        with patch.dict("os.environ", {
+            "BCS_QA_PROFILES_JSON": '{"unsafe":[{"check_id":"one","name":"Unsafe","argv":["sh","-c","id"]}]}',
+            "BCS_QA_ALLOWED_EXECUTABLES": "python,pytest",
+        }, clear=False):
+            with self.assertRaises(RuntimeError):
+                _qa_profiles_from_environment()
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
