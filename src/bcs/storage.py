@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 8
+_SCHEMA_VERSION = 9
 
 
 class StorageError(RuntimeError):
@@ -167,6 +167,17 @@ class SQLiteOrchestrationStore:
                             created_at TEXT NOT NULL,
                             payload TEXT NOT NULL CHECK (json_valid(payload)),
                             PRIMARY KEY (integration_id, qa_run_id),
+                            FOREIGN KEY (integration_id)
+                                REFERENCES integration_runs(integration_id)
+                        )
+                    """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS integration_promotion_requests (
+                            request_id TEXT PRIMARY KEY,
+                            integration_id TEXT NOT NULL,
+                            status TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            payload TEXT NOT NULL CHECK (json_valid(payload)),
                             FOREIGN KEY (integration_id)
                                 REFERENCES integration_runs(integration_id)
                         )
@@ -479,6 +490,101 @@ class SQLiteOrchestrationStore:
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise StorageError("Stored integration QA assessment is invalid.") from exc
         return tuple(records)
+
+
+    def save_integration_promotion_request(self, record: dict) -> None:
+        required = {"request_id", "integration_id", "commit_sha", "target_branch", "target_base_sha", "qa_run_id", "task_id"}
+        if not isinstance(record, dict) or set(record) != required:
+            raise StorageError("Promotion request has an invalid shape.")
+        if any(not isinstance(record[key], str) or not record[key] for key in required):
+            raise StorageError("Promotion request identity fields are required.")
+        if record["target_branch"] != "development":
+            raise StorageError("Only development may be a promotion target.")
+        payload = {"version": 1, **record, "status": "pending", "promoted_at": None, "promoted_by": None}
+        encoded = self._json(payload)
+        created_at = datetime.now().astimezone().isoformat()
+        with self._lock:
+            try:
+                with self._connection:
+                    integration = self._connection.execute(
+                        "SELECT payload FROM integration_runs WHERE integration_id = ?",
+                        (record["integration_id"],),
+                    ).fetchone()
+                    if integration is None:
+                        raise StorageError("Promotion request references an unknown integration.")
+                    data = json.loads(integration["payload"])
+                    if data.get("commit_sha") != record["commit_sha"]:
+                        raise StorageError("Promotion request commit does not match integration.")
+                    self._connection.execute(
+                        "INSERT INTO integration_promotion_requests (request_id,integration_id,status,created_at,payload) VALUES (?,?,?,?,?)",
+                        (record["request_id"], record["integration_id"], "pending", created_at, encoded),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise StorageError("Promotion request ID already exists.") from exc
+            except sqlite3.Error as exc:
+                raise StorageError("Could not persist promotion request.") from exc
+
+    def get_integration_promotion_request(self, request_id: str):
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM integration_promotion_requests WHERE request_id = ?",
+                (request_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            data = json.loads(row["payload"])
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported promotion request.")
+            data.pop("version")
+            return data
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StorageError("Stored promotion request is invalid.") from exc
+
+    def list_integration_promotion_requests(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM integration_promotion_requests ORDER BY created_at, request_id"
+            ).fetchall()
+        records = []
+        for row in rows:
+            try:
+                data = json.loads(row["payload"])
+                if not isinstance(data, dict) or data.get("version") != 1:
+                    raise ValueError("Unsupported promotion request.")
+                data.pop("version")
+                records.append(data)
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise StorageError("Stored promotion request is invalid.") from exc
+        return tuple(records)
+
+    def mark_integration_promotion_completed(self, request_id: str, *, promoted_by: str) -> dict:
+        if not isinstance(promoted_by, str) or not promoted_by.strip():
+            raise StorageError("Human promotion actor is required.")
+        with self._lock:
+            try:
+                with self._connection:
+                    row = self._connection.execute(
+                        "SELECT payload FROM integration_promotion_requests WHERE request_id = ?",
+                        (request_id,),
+                    ).fetchone()
+                    if row is None:
+                        raise StorageError("Promotion request does not exist.")
+                    data = json.loads(row["payload"])
+                    if data.get("status") == "promoted":
+                        return {key: value for key, value in data.items() if key != "version"}
+                    if data.get("status") != "pending":
+                        raise StorageError("Promotion request is not pending.")
+                    data["status"] = "promoted"
+                    data["promoted_at"] = datetime.now().astimezone().isoformat()
+                    data["promoted_by"] = promoted_by
+                    self._connection.execute(
+                        "UPDATE integration_promotion_requests SET status = ?, payload = ? WHERE request_id = ?",
+                        ("promoted", self._json(data), request_id),
+                    )
+                    return {key: value for key, value in data.items() if key != "version"}
+            except sqlite3.Error as exc:
+                raise StorageError("Could not record promotion completion.") from exc
 
     @staticmethod
     def _feedback_payload(record: "FeedbackCycle") -> dict:
