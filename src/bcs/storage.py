@@ -164,6 +164,7 @@ class SQLiteOrchestrationStore:
                 "evidence_refs": list(task.evidence_refs),
                 "attempt": task.attempt,
                 "dependency_ids": list(task.dependency_ids),
+                "workspace_group_id": task.workspace_group_id,
             },
             "state": record.state.value,
             "assigned_worker_id": record.assigned_worker_id,
@@ -211,6 +212,7 @@ class SQLiteOrchestrationStore:
                 evidence_refs=tuple(raw["evidence_refs"]),
                 attempt=raw["attempt"],
                 dependency_ids=tuple(raw.get("dependency_ids", ())),
+                workspace_group_id=raw.get("workspace_group_id", ""),
             )
             raw_result = data["result"]
             result = None if raw_result is None else WorkerResult(
