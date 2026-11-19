@@ -14,6 +14,7 @@ from bcs.orchestrator import (
 from bcs.qa_handoff import QAEscalation
 from bcs.storage import SQLiteOrchestrationStore, StorageError
 from bcs.consultation import ConsultationRecord
+from bcs.consultation_feedback import ConsultationOutcome
 
 
 class SQLiteOrchestrationStoreTests(unittest.TestCase):
@@ -127,6 +128,56 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             self.assertEqual(reopened.list_consultations("task-1"), (expected,))
             self.assertEqual(reopened.list_consultations("missing"), ())
             reopened.close()
+
+    def test_consultation_outcome_is_durable_and_requires_existing_consultation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bcs.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            consultation = ConsultationRecord(
+                consultation_id="consult-feedback-1", task_id="task-feedback",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="Which boundary?",
+                reason="A design risk exists.", advice="Use an adapter.",
+                risks=(), next_steps=("Define interface.",), confidence="medium",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            store.save_consultation(consultation)
+            outcome = ConsultationOutcome(
+                outcome_id="outcome-1", consultation_id=consultation.consultation_id,
+                task_id=consultation.task_id, disposition="partially_followed",
+                worker_reason="Used the adapter boundary but changed its shape.",
+                qa_status="failed", qa_run_id="qa-run-1",
+                evidence_refs=("evidence:failed-check",),
+                created_at=datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc),
+            )
+            store.save_consultation_outcome(outcome)
+            store.close()
+            reopened = SQLiteOrchestrationStore(path)
+            self.assertEqual(reopened.list_consultation_outcomes("task-feedback"), (outcome,))
+            self.assertEqual(reopened.list_consultation_outcomes("other-task"), ())
+            reopened.close()
+
+    def test_consultation_outcome_cannot_claim_qa_without_evidence(self):
+        with self.assertRaises(ValueError):
+            ConsultationOutcome(
+                outcome_id="outcome-invalid", consultation_id="consult-unknown",
+                task_id="task-1", disposition="followed", worker_reason="Used it.",
+                qa_status="passed", qa_run_id=None, evidence_refs=(),
+                created_at=datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc),
+            )
+
+    def test_consultation_outcome_requires_consultation_foreign_key(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "bcs.sqlite3")
+            outcome = ConsultationOutcome(
+                outcome_id="outcome-orphan", consultation_id="missing",
+                task_id="task-1", disposition="unknown", worker_reason="",
+                qa_status="not_assessed", qa_run_id=None, evidence_refs=(),
+                created_at=datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc),
+            )
+            with self.assertRaises(StorageError):
+                store.save_consultation_outcome(outcome)
+            store.close()
 
     def test_schema_v3_database_is_migrated_for_consultation_history(self):
         with tempfile.TemporaryDirectory() as folder:
