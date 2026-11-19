@@ -21,7 +21,7 @@ from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
 from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationRouter, ConsultationRoute, ConsultationRecord)
 from .consultation_feedback import ConsultationOutcome
-from .policy import OperatingMode, PolicyContext
+from .policy import OperatingMode, PolicyContext, ToolRequest, request_fingerprint
 from .workspace import Workspace
 from .workspace_leases import WorkspaceLeaseManager
 from .workspace_gateway import WorkspaceToolGateway
@@ -967,6 +967,161 @@ class BCSRuntime:
     def integration_qa_history(self, integration_id: str):
         """Return append-only QA assessments for one integration."""
         return self.store.list_integration_qa_assessments(integration_id)
+
+
+    @staticmethod
+    def _promotion_tool_request(record: dict) -> ToolRequest:
+        return ToolRequest(
+            request_id=record["request_id"],
+            task_id=record["task_id"],
+            worker_id="bcs-release-controller",
+            workspace_id="integration-" + record["integration_id"][:160],
+            capability="release.deploy",
+            arguments={
+                "integration_id": record["integration_id"],
+                "commit_sha": record["commit_sha"],
+                "target_branch": record["target_branch"],
+                "target_base_sha": record["target_base_sha"],
+                "qa_run_id": record["qa_run_id"],
+            },
+        )
+
+    def request_integration_promotion(
+        self, *, manager, integration_id: str, target_branch: str = "development"
+    ):
+        """Create a human approval request for a QA-passed exact integration commit."""
+        from .git_worktrees import GitWorktreeManager
+        if not isinstance(manager, GitWorktreeManager):
+            raise TypeError("A trusted GitWorktreeManager is required.")
+        if target_branch != "development" or target_branch != manager.base_ref:
+            raise ValueError("BCS promotion is restricted to the development branch; main is never a target.")
+        integration = next(
+            (item for item in self.store.list_integration_runs()
+             if item["integration_id"] == integration_id),
+            None,
+        )
+        if integration is None:
+            raise KeyError("Integration does not exist.")
+        if integration["status"] != "awaiting_qa":
+            raise ValueError("Integration is not awaiting promotion review.")
+        assessments = self.store.list_integration_qa_assessments(integration_id)
+        if not assessments:
+            raise ValueError("Promotion requires an executed QA assessment.")
+        latest = assessments[-1]
+        if (
+            latest["status"] != "passed"
+            or latest["executed_check_count"] < 1
+            or latest["commit_sha"] != integration["commit_sha"]
+        ):
+            raise ValueError("The latest QA assessment must pass on this exact integration commit.")
+        checkout = Path(integration["path"]).resolve(strict=True)
+        try:
+            checkout.relative_to(manager.worktree_root.resolve(strict=True))
+        except ValueError as exc:
+            raise ValueError("Integration checkout is outside the trusted worktree root.") from exc
+        if manager._run(["rev-parse", "HEAD"], cwd=checkout).stdout.strip() != integration["commit_sha"]:
+            raise ValueError("Integration checkout no longer matches its recorded commit.")
+        target_base_sha = manager._run(
+            ["rev-parse", "refs/heads/development"]
+        ).stdout.strip()
+        manager._run(
+            ["merge-base", "--is-ancestor", target_base_sha, integration["commit_sha"]],
+            cwd=checkout,
+        )
+        request_id = "promotion_" + uuid4().hex
+        task_id = latest["task_id"]
+        record = {
+            "request_id": request_id,
+            "integration_id": integration_id,
+            "commit_sha": integration["commit_sha"],
+            "target_branch": "development",
+            "target_base_sha": target_base_sha,
+            "qa_run_id": latest["qa_run_id"],
+            "task_id": task_id,
+        }
+        self.store.save_integration_promotion_request(record)
+        approval = self.approvals.submit(self._promotion_tool_request(record))
+        return approval
+
+    def integration_promotion_history(self):
+        return self.store.list_integration_promotion_requests()
+
+    def promote_integration(self, *, manager, request_id: str) -> dict:
+        """Fast-forward development only after the exact release.deploy approval."""
+        from .git_worktrees import GitWorktreeError, GitWorktreeManager
+        if not isinstance(manager, GitWorktreeManager):
+            raise TypeError("A trusted GitWorktreeManager is required.")
+        record = self.store.get_integration_promotion_request(request_id)
+        if record is None:
+            raise KeyError("Promotion request does not exist.")
+        if record["status"] == "promoted":
+            return record
+        approval = self.approvals.get(request_id)
+        if approval is None or approval.status.value != "approved":
+            raise ValueError("A human-approved release.deploy request is required.")
+        if approval.capability != "release.deploy":
+            raise ValueError("Approval is not bound to release.deploy.")
+        expected = request_fingerprint(self._promotion_tool_request(record))
+        if approval.request_fingerprint != expected:
+            raise ValueError("Approval fingerprint does not match this exact promotion request.")
+        if approval.decided_by is None:
+            raise ValueError("Approved promotion is missing its human approver identity.")
+        if record["target_branch"] != "development" or manager.base_ref != "development":
+            raise ValueError("Promotion to main or any branch other than development is forbidden.")
+        integration = next(
+            (item for item in self.store.list_integration_runs()
+             if item["integration_id"] == record["integration_id"]),
+            None,
+        )
+        if integration is None or integration["commit_sha"] != record["commit_sha"]:
+            raise ValueError("Promotion request no longer matches its integration record.")
+        assessments = self.store.list_integration_qa_assessments(record["integration_id"])
+        if not assessments:
+            raise ValueError("Promotion requires a QA assessment.")
+        latest = assessments[-1]
+        if (
+            latest["status"] != "passed"
+            or latest["executed_check_count"] < 1
+            or latest["qa_run_id"] != record["qa_run_id"]
+            or latest["commit_sha"] != record["commit_sha"]
+        ):
+            raise ValueError("The latest QA result no longer authorizes this promotion.")
+        checkout = Path(integration["path"]).resolve(strict=True)
+        try:
+            checkout.relative_to(manager.worktree_root.resolve(strict=True))
+        except ValueError as exc:
+            raise ValueError("Integration checkout is outside the trusted worktree root.") from exc
+        if manager._run(["rev-parse", "HEAD"], cwd=checkout).stdout.strip() != record["commit_sha"]:
+            raise ValueError("Integration checkout changed after approval.")
+        current_branch = manager._run(["symbolic-ref", "--short", "HEAD"]).stdout.strip()
+        if current_branch != "development":
+            raise GitWorktreeError("Promotion requires the repository checkout to be on development.")
+        current_head = manager._run(["rev-parse", "HEAD"]).stdout.strip()
+        if current_head != record["target_base_sha"]:
+            already_in_history = False
+            try:
+                manager._run(
+                    ["merge-base", "--is-ancestor", record["commit_sha"], current_head]
+                )
+                already_in_history = True
+            except GitWorktreeError:
+                pass
+            if not already_in_history:
+                raise GitWorktreeError("Development moved since approval; a fresh integration and approval are required.")
+        else:
+            dirty = manager._run(
+                ["status", "--porcelain", "--untracked-files=all"]
+            ).stdout.strip()
+            if dirty:
+                raise GitWorktreeError("Refusing promotion while the development checkout has uncommitted files.")
+            manager._run(["merge", "--ff-only", "--no-edit", record["commit_sha"]])
+        promoted_head = manager._run(["rev-parse", "HEAD"]).stdout.strip()
+        if promoted_head != record["commit_sha"]:
+            manager._run(["merge-base", "--is-ancestor", record["commit_sha"], promoted_head])
+        return self.store.mark_integration_promotion_completed(
+            request_id, promoted_by=approval.decided_by
+        )
+
 
     def integration_history(self):
         """Return durable integration records, including after runtime restart."""
