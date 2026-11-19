@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 
 from .approvals import ApprovalService
-from .feedback import FeedbackController
+from .feedback import FeedbackController, FeedbackState, FeedbackSnapshot
 from .qa import EvidenceStore
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
@@ -21,9 +21,20 @@ from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
 from .scheduler import TaskScheduler
 from .planner import TaskPlanner
-from .orchestrator import Orchestrator, WorkerTask
+from .orchestrator import Orchestrator, WorkerTask, WorkerResult, WorkerResultStatus, DispatchOutcome
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
+
+
+@dataclass(frozen=True)
+class AutonomousRunResult:
+    task_id: str
+    state: FeedbackState | None
+    dispatch_outcomes: tuple[DispatchOutcome, ...]
+    reviews: tuple[QAReview, ...]
+    repair_task_ids: tuple[str, ...]
+    feedback: FeedbackSnapshot | None
+    reason: str
 
 
 @dataclass
@@ -168,6 +179,130 @@ class BCSRuntime:
         report, feedback_snapshot, repair_task_ids = self.apply_qa_review(review)
         return review, report, feedback_snapshot, repair_task_ids
 
+    def execute_with_qa(
+        self,
+        task_id: str,
+        supervisor: QASupervisor,
+        *,
+        max_repair_rounds: int = 3,
+    ) -> AutonomousRunResult:
+        """Run a task, repair QA findings, and independently review each repair.
+
+        This method never converts model review into executed test evidence. It
+        stops on blocked/failed workers, QA escalation, unavailable specialists,
+        or a bounded repair-round limit.
+        """
+        if not isinstance(supervisor, QASupervisor) and not callable(
+            getattr(supervisor, "review", None)
+        ):
+            raise TypeError("A trusted QA supervisor is required.")
+        if (
+            isinstance(max_repair_rounds, bool)
+            or not isinstance(max_repair_rounds, int)
+            or not 1 <= max_repair_rounds <= 5
+        ):
+            raise ValueError("max_repair_rounds must be between 1 and 5.")
+        record = self.orchestrator.get_task(task_id)
+        if record is None:
+            raise KeyError("Task does not exist.")
+        if record.state.value != "queued":
+            raise ValueError("Autonomous QA execution requires a queued task.")
+
+        dispatches = []
+        reviews = []
+        repairs = []
+        initial = self.orchestrator.dispatch(task_id)
+        dispatches.append(initial)
+        if initial.state.value != "completed" or initial.result is None:
+            return AutonomousRunResult(
+                task_id, None, tuple(dispatches), (), (),
+                self.feedback.get_snapshot(task_id),
+                initial.reason or "Initial worker did not complete successfully.",
+            )
+
+        current_result = initial.result
+        for repair_round in range(max_repair_rounds + 1):
+            review, report, snapshot, repair_ids = self.review_and_handoff(
+                record.task, current_result, supervisor
+            )
+            reviews.append(review)
+            if review.status.value == "blocked" or report is None:
+                return AutonomousRunResult(
+                    task_id, FeedbackState.HUMAN_ATTENTION, tuple(dispatches),
+                    tuple(reviews), tuple(repairs), self.feedback.get_snapshot(task_id),
+                    "QA was blocked; no completion decision was made.",
+                )
+            repairs.extend(repair_ids)
+            if snapshot.state == FeedbackState.VERIFIED:
+                return AutonomousRunResult(
+                    task_id, snapshot.state, tuple(dispatches), tuple(reviews),
+                    tuple(repairs), snapshot,
+                    "QA feedback policy completed its required independent review cycles. "
+                    "This is not a substitute for executed test evidence or release approval.",
+                )
+            if snapshot.state in {
+                FeedbackState.HUMAN_ATTENTION,
+                FeedbackState.CYCLE_BUDGET_EXHAUSTED,
+            }:
+                return AutonomousRunResult(
+                    task_id, snapshot.state, tuple(dispatches), tuple(reviews),
+                    tuple(repairs), snapshot, snapshot.cycles[-1].instruction,
+                )
+            if snapshot.state == FeedbackState.VERIFY_AGAIN:
+                continue
+            if snapshot.state != FeedbackState.REPAIR_REQUIRED:
+                return AutonomousRunResult(
+                    task_id, snapshot.state, tuple(dispatches), tuple(reviews),
+                    tuple(repairs), snapshot, "Feedback controller returned an unsupported state.",
+                )
+            if repair_round >= max_repair_rounds:
+                return AutonomousRunResult(
+                    task_id, snapshot.state, tuple(dispatches), tuple(reviews),
+                    tuple(repairs), snapshot,
+                    "Repair-round limit reached. Findings remain open and require another bounded run or human direction.",
+                )
+            if not repair_ids:
+                return AutonomousRunResult(
+                    task_id, snapshot.state, tuple(dispatches), tuple(reviews),
+                    tuple(repairs), snapshot,
+                    "QA requested repair but produced no dispatchable repair tasks.",
+                )
+
+            repair_results = self.scheduler.dispatch_independent(repair_ids)
+            dispatches.extend(repair_results.outcomes)
+            incomplete = [
+                outcome for outcome in repair_results.outcomes
+                if outcome.state.value != "completed" or outcome.result is None
+            ]
+            if incomplete:
+                return AutonomousRunResult(
+                    task_id, FeedbackState.HUMAN_ATTENTION, tuple(dispatches),
+                    tuple(reviews), tuple(repairs), snapshot,
+                    "A repair worker failed, was blocked, or had no available specialist. "
+                    "The original task remains unverified.",
+                )
+            changed_files = list(current_result.changed_files)
+            evidence_refs = list(current_result.evidence_refs)
+            summaries = [current_result.summary]
+            for outcome in repair_results.outcomes:
+                repair_result = outcome.result
+                summaries.append(repair_result.summary)
+                changed_files.extend(repair_result.changed_files)
+                evidence_refs.extend(repair_result.evidence_refs)
+            current_result = WorkerResult(
+                status=WorkerResultStatus.COMPLETED,
+                summary="\n".join(summaries)[-12000:],
+                changed_files=tuple(dict.fromkeys(changed_files)),
+                evidence_refs=tuple(dict.fromkeys(evidence_refs)),
+            )
+
+        snapshot = self.feedback.get_snapshot(task_id)
+        return AutonomousRunResult(
+            task_id, None if snapshot is None else snapshot.state,
+            tuple(dispatches), tuple(reviews), tuple(repairs), snapshot,
+            "Autonomous QA loop stopped without a verified result.",
+        )
+
     def close(self) -> None:
         self.store.close()
 
@@ -244,4 +379,4 @@ def create_runtime(
         raise
 
 
-__all__ = ["BCSRuntime", "create_runtime"]
+__all__ = ["BCSRuntime", "AutonomousRunResult", "create_runtime"]
