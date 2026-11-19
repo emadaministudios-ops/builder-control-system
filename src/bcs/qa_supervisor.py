@@ -170,10 +170,10 @@ class QASupervisor:
                 "Worker did not complete successfully; QA cannot review a completed implementation.",
                 None,
             )
-        if not result.changed_files or len(result.changed_files) > self.max_files:
+        if len(result.changed_files) > self.max_files:
             return QAReview(
                 task.task_id, ReviewStatus.BLOCKED, (), (),
-                "No changed files were supplied or the change set exceeds QA inspection limits.",
+                "The change set exceeds QA inspection limits.",
                 None,
             )
         try:
@@ -218,7 +218,7 @@ class QASupervisor:
             }
             second = self._call(
                 "You are an independent QA supervisor. Compare implementation evidence "
-                "against every requirement. Return JSON only with exactly these keys: "
+                "against every requirement, using inspected files when present and the worker summary when the task is analysis-only. Do not claim implementation evidence that was not supplied. Return JSON only with exactly these keys: "
                 "{\"summary\":\"...\",\"findings\":[{\"requirement_id\":\"R1\","
                 "\"severity\":\"critical|high|medium|low\",\"issue\":\"...\","
                 "\"expected\":\"...\",\"observed\":\"...\","
