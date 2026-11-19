@@ -3,7 +3,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -187,7 +187,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             connection.close()
             with SQLiteOrchestrationStore(path) as store:
                 version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-                self.assertEqual(version, 9)
+                self.assertEqual(version, 10)
                 self.assertEqual(store.list_consultations(), ())
 
     def test_integration_qa_assessment_is_durable_and_idempotent(self):
@@ -259,6 +259,75 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             with self.assertRaises(StorageError):
                 store.save_integration_qa_assessment(record)
             store.close()
+
+    def test_execution_job_survives_restart_and_is_scoped_to_requester(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "jobs.sqlite3"
+            now = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc)
+            store = SQLiteOrchestrationStore(path)
+            job = store.enqueue_execution_job(
+                job_id="job-restart", task_ids=("task-a", "task-b"),
+                requested_by="owner-a", now=now,
+            )
+            self.assertEqual(job["state"], "queued")
+            store.close()
+            reopened = SQLiteOrchestrationStore(path)
+            self.assertEqual(reopened.get_execution_job("job-restart")["task_ids"], ("task-a", "task-b"))
+            self.assertEqual(len(reopened.list_execution_jobs(requested_by="owner-a")), 1)
+            self.assertEqual(reopened.list_execution_jobs(requested_by="owner-b"), ())
+            reopened.close()
+
+    def test_execution_job_claim_reclaims_expired_lease_and_rejects_stale_owner(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "jobs.sqlite3")
+            now = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc)
+            store.enqueue_execution_job(
+                job_id="job-lease", task_ids=("task-a",), requested_by="owner",
+                now=now,
+            )
+            first = store.claim_next_execution_job(
+                worker_id="worker-old", now=now, lease_seconds=15,
+            )
+            self.assertEqual(first["attempt"], 1)
+            second = store.claim_next_execution_job(
+                worker_id="worker-new", now=now + timedelta(seconds=16),
+                lease_seconds=15,
+            )
+            self.assertEqual(second["attempt"], 2)
+            self.assertEqual(second["lease_owner"], "worker-new")
+            stale = store.complete_execution_job(
+                job_id="job-lease", worker_id="worker-old", attempt=1,
+                state="completed", outcomes=[], now=now + timedelta(seconds=17),
+            )
+            self.assertFalse(stale)
+            self.assertTrue(store.complete_execution_job(
+                job_id="job-lease", worker_id="worker-new", attempt=2,
+                state="completed", outcomes=[{"task_id": "task-a", "state": "completed"}],
+                now=now + timedelta(seconds=18),
+            ))
+            self.assertEqual(store.get_execution_job("job-lease")["state"], "completed")
+            store.close()
+
+    def test_execution_job_duplicate_id_is_idempotent_but_conflicts_are_rejected(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "jobs.sqlite3")
+            now = datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc)
+            first = store.enqueue_execution_job(
+                job_id="job-idempotent", task_ids=("task-a",),
+                requested_by="owner", now=now,
+            )
+            again = store.enqueue_execution_job(
+                job_id="job-idempotent", task_ids=("task-a",),
+                requested_by="owner", now=now,
+            )
+            self.assertEqual(first, again)
+            with self.assertRaises(StorageError):
+                store.enqueue_execution_job(
+                    job_id="job-idempotent", task_ids=("task-b",),
+                    requested_by="owner", now=now,
+                )
+            store.close()
+
     def test_memory_database_supported(self):
         with SQLiteOrchestrationStore(":memory:") as store:
             store.save_task(self.record())
