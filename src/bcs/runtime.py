@@ -13,7 +13,10 @@ from pathlib import Path
 
 from .approvals import ApprovalService
 from .feedback import FeedbackController, FeedbackState, FeedbackSnapshot
-from .qa import EvidenceStore
+from .qa import EvidenceStore, QAReport
+from .qa_runner import QAExecutionRunner
+from .sandbox_executor import DockerSandboxExecutor
+from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
 from .policy import OperatingMode, PolicyContext
@@ -170,6 +173,77 @@ class BCSRuntime:
             gateway_factory=gateway_factory,
             provider_id=provider_id,
         )
+
+    def create_qa_execution_runner(
+        self,
+        task: WorkerTask,
+        *,
+        workspace_factory,
+        docker_executable: str,
+        image: str,
+        allowed_images: frozenset[str],
+        mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        worker_id: str = "qa-runner",
+        limits: SandboxLimits = SandboxLimits(),
+    ) -> QAExecutionRunner:
+        """Create a sandboxed executable QA runner for a trusted task workspace."""
+        if not isinstance(task, WorkerTask):
+            raise TypeError("A trusted WorkerTask is required.")
+        if not callable(workspace_factory):
+            raise TypeError("A trusted QA workspace factory is required.")
+        if not isinstance(mode, OperatingMode):
+            raise TypeError("Operating mode must be an OperatingMode value.")
+        workspace = workspace_factory(task)
+        if not isinstance(workspace, Workspace):
+            raise TypeError("Workspace factory must return a trusted Workspace.")
+        grants = frozenset({"tests.run"})
+        context = PolicyContext(
+            mode=mode,
+            task_id=task.task_id,
+            worker_id=worker_id,
+            workspace_id=workspace.workspace_id,
+            expected_workspace_id=workspace.workspace_id,
+            task_active=True,
+            worker_active=True,
+            task_capabilities=grants,
+            worker_capabilities=grants,
+        )
+        executor = DockerSandboxExecutor(
+            workspace=workspace,
+            context=context,
+            approvals=self.approvals,
+            docker_executable=docker_executable,
+            image=image,
+            allowed_images=allowed_images,
+            limits=limits,
+        )
+        return QAExecutionRunner(executor, self.evidence_store)
+
+    def run_executable_qa(
+        self,
+        task: WorkerTask,
+        checks,
+        *,
+        workspace_factory,
+        docker_executable: str,
+        image: str,
+        allowed_images: frozenset[str],
+        mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        worker_id: str = "qa-runner",
+        limits: SandboxLimits = SandboxLimits(),
+    ) -> QAReport:
+        """Execute controller-defined QA commands and retain their evidence."""
+        runner = self.create_qa_execution_runner(
+            task,
+            workspace_factory=workspace_factory,
+            docker_executable=docker_executable,
+            image=image,
+            allowed_images=allowed_images,
+            mode=mode,
+            worker_id=worker_id,
+            limits=limits,
+        )
+        return runner.run(task_id=task.task_id, checks=checks)
 
     def review_and_handoff(self, task: WorkerTask, result, supervisor: QASupervisor):
         """Run three-pass QA, persist its report, and enqueue any repair tasks."""
