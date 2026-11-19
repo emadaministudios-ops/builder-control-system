@@ -108,9 +108,15 @@ class ExecutionJobService:
                 } for item in result.outcomes]
             if not isinstance(outcomes, list) or not outcomes or len(outcomes) > 100:
                 raise ValueError("Execution handler returned an invalid outcome list.")
-            completed = sum(item.get("state") == "completed" and item.get("qa", {}).get("status", "not_configured") not in {"blocked", "repair_required", "failed"} for item in outcomes)
-            state = "completed" if completed == len(outcomes) else (
-                "partial" if completed else "failed"
+            worker_completed = sum(item.get("state") == "completed" for item in outcomes)
+            fully_completed = sum(
+                item.get("state") == "completed"
+                and item.get("qa", {}).get("status", "not_configured")
+                not in {"blocked", "repair_required", "failed"}
+                for item in outcomes
+            )
+            state = "completed" if fully_completed == len(outcomes) else (
+                "partial" if worker_completed else "failed"
             )
             self.store.complete_execution_job(
                 job_id=job["job_id"], worker_id=self.worker_id,
