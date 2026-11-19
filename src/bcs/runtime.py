@@ -19,6 +19,7 @@ from .sandbox_executor import DockerSandboxExecutor
 from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
+from .consultation import SpecialistConsultant, SpecialistAdvice
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
@@ -130,6 +131,23 @@ class BCSRuntime:
             worker_id=worker_id, role=role, handler=worker
         )
         return worker
+
+    def consult_specialist(
+        self, *, requesting_role: str, specialist_role: str,
+        objective: str, question: str, context: str = "",
+        provider_id: str | None = None,
+    ) -> SpecialistAdvice:
+        """Obtain bounded advisory input without granting the consultant tools."""
+        consultant = SpecialistConsultant(
+            providers=self.providers, provider_id=provider_id,
+        )
+        return consultant.consult(
+            requesting_role=requesting_role,
+            specialist_role=specialist_role,
+            objective=objective,
+            question=question,
+            context=context,
+        )
 
     def apply_qa_review(self, review: QAReview):
         """Persist QA feedback and enqueue deterministic repair handoffs."""
