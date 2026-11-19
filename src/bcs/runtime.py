@@ -27,7 +27,8 @@ from .workspace_leases import WorkspaceLeaseManager
 from .workspace_gateway import WorkspaceToolGateway
 from .scheduler import TaskScheduler
 from .planner import TaskPlanner
-from .orchestrator import Orchestrator, WorkerTask, WorkerResult, WorkerResultStatus, DispatchOutcome
+from .orchestrator import Orchestrator, WorkerTask, WorkerResult, WorkerResultStatus, DispatchOutcome, TaskState
+from .git_integration import GitIntegrationCoordinator
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
 
@@ -758,6 +759,55 @@ class BCSRuntime:
             task_id, None if snapshot is None else snapshot.state,
             tuple(dispatches), tuple(reviews), tuple(repairs), snapshot,
             "Autonomous QA loop stopped without a verified result.",
+        )
+
+    def create_git_integration_coordinator(self, manager, *, max_groups: int = 32) -> GitIntegrationCoordinator:
+        """Create the guarded integration service for this runtime."""
+        return GitIntegrationCoordinator(manager, max_groups=max_groups)
+
+    def integrate_completed_work(
+        self,
+        *,
+        manager,
+        integration_id: str,
+        workspace_group_ids: tuple[str, ...] | list[str],
+    ):
+        """Integrate only workspace groups whose persisted tasks are all completed.
+
+        This creates an isolated integration branch and returns an awaiting-QA
+        result. It never approves release or promotes changes to development/main.
+        """
+        if (
+            isinstance(workspace_group_ids, (str, bytes))
+            or not isinstance(workspace_group_ids, (tuple, list))
+            or not workspace_group_ids
+        ):
+            raise ValueError("Provide one or more completed workspace group IDs.")
+        if len(set(workspace_group_ids)) != len(workspace_group_ids):
+            raise ValueError("Workspace group IDs must be unique.")
+
+        records = self.orchestrator.snapshot().tasks
+        for group_id in workspace_group_ids:
+            group_tasks = [
+                item for item in records
+                if item.task.workspace_group_id == group_id
+            ]
+            if not group_tasks:
+                raise ValueError("Workspace group has no registered orchestration tasks.")
+            unfinished = [
+                item.task.task_id for item in group_tasks
+                if item.state is not TaskState.COMPLETED
+            ]
+            if unfinished:
+                raise ValueError(
+                    "Integration is blocked until every task in the workspace group "
+                    "is completed: " + ", ".join(unfinished[:10])
+                )
+
+        coordinator = self.create_git_integration_coordinator(manager)
+        return coordinator.integrate(
+            integration_id=integration_id,
+            workspace_group_ids=workspace_group_ids,
         )
 
     def close(self) -> None:
