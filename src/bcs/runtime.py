@@ -122,6 +122,7 @@ class BCSRuntime:
             return WorkspaceToolGateway(workspace, context, self.approvals)
 
         consultation_cache: dict[str, str] = {}
+        consultation_ids: dict[str, str] = {}
 
         def consultation_provider(task: WorkerTask) -> str:
             if task.task_id not in consultation_cache:
@@ -152,11 +153,29 @@ class BCSRuntime:
                             + "\\nSuggested next steps: " + "; ".join(advice.next_steps)
                             + "\\nConfidence: " + advice.confidence
                         )
+                        records = self.store.list_consultations(task.task_id)
+                        selected = next(
+                            (item for item in reversed(records) if item.should_consult),
+                            None,
+                        )
+                        if selected is not None:
+                            consultation_ids[task.task_id] = selected.consultation_id
                 except Exception:
                     # Advice is optional; failure never grants extra authority.
                     pass
                 consultation_cache[task.task_id] = "\\n\\n".join(context_parts)[:8000]
             return consultation_cache[task.task_id]
+
+        def worker_handler(task: WorkerTask) -> WorkerResult:
+            result = worker(task)
+            consultation_id = consultation_ids.get(task.task_id)
+            if consultation_id is not None:
+                self.record_consultation_outcome(
+                    consultation_id=consultation_id,
+                    disposition=result.consultation_disposition,
+                    worker_reason=result.consultation_reason,
+                )
+            return result
 
         worker = ModelWorker(
             worker_id=worker_id,
@@ -167,7 +186,7 @@ class BCSRuntime:
             consultation_provider=consultation_provider,
         )
         self.orchestrator.register_worker(
-            worker_id=worker_id, role=role, handler=worker
+            worker_id=worker_id, role=role, handler=worker_handler
         )
         return worker
 
@@ -316,9 +335,52 @@ class BCSRuntime:
         """Return append-only adoption and QA outcome records."""
         return self.store.list_consultation_outcomes(task_id)
 
+    def _record_qa_consultation_assessments(self, report: QAReport) -> None:
+        """Attach controller-generated QA status to consultation adoption records."""
+        if not isinstance(report, QAReport):
+            raise TypeError("A validated QAReport is required.")
+        if report.status == QACheckStatus.FAILED:
+            qa_status = "failed"
+        elif report.status == QACheckStatus.BLOCKED:
+            qa_status = "blocked"
+        elif report.status == QACheckStatus.ERROR:
+            qa_status = "error"
+        elif any(check.executed for check in report.checks):
+            qa_status = "passed"
+        else:
+            # Static-only review cannot establish that implementation tests passed.
+            qa_status = "not_assessed"
+        evidence_refs = tuple(
+            check.evidence_ref for check in report.checks if check.evidence_ref
+        )
+        consultations = self.store.list_consultations(report.task_id)
+        outcomes = self.store.list_consultation_outcomes(report.task_id)
+        latest = {}
+        for outcome in outcomes:
+            current = latest.get(outcome.consultation_id)
+            if current is None or outcome.created_at > current.created_at:
+                latest[outcome.consultation_id] = outcome
+        for consultation in consultations:
+            if not consultation.should_consult:
+                continue
+            previous = latest.get(consultation.consultation_id)
+            if previous is None:
+                continue
+            if previous.qa_run_id == report.qa_run_id and previous.qa_status == qa_status:
+                continue
+            self.record_consultation_outcome(
+                consultation_id=consultation.consultation_id,
+                disposition=previous.disposition,
+                worker_reason=previous.worker_reason,
+                qa_status=qa_status,
+                qa_run_id=report.qa_run_id if qa_status != "not_assessed" else None,
+                evidence_refs=evidence_refs if qa_status != "not_assessed" else (),
+            )
+
     def apply_qa_review(self, review: QAReview):
         """Persist QA feedback and enqueue deterministic repair handoffs."""
         report = build_qa_report(review, self.evidence_store)
+        self._record_qa_consultation_assessments(report)
         feedback_snapshot = self.feedback.record_qa_report(report)
         repair_task_ids = self.orchestrator.ingest_qa_report(report)
         return report, feedback_snapshot, repair_task_ids
@@ -462,6 +524,7 @@ class BCSRuntime:
                 started_at=min(report.started_at, execution_report.started_at),
                 finished_at=max(report.finished_at, execution_report.finished_at),
             )
+        self._record_qa_consultation_assessments(report)
         feedback_snapshot = self.feedback.record_qa_report(report)
         repair_task_ids = self.orchestrator.ingest_qa_report(report)
         return review, report, feedback_snapshot, repair_task_ids
