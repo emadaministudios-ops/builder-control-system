@@ -43,6 +43,88 @@ class TaskSchedulerTests(unittest.TestCase):
         self.assertTrue(all(item.state == TaskState.COMPLETED for item in result.outcomes))
         self.assertEqual(peak, 2)
 
+    def test_dispatch_plan_runs_dependency_waves_in_order(self):
+        orchestrator = Orchestrator()
+        orchestrator.create_task(
+            task_id="design", objective="Design API",
+            acceptance_criteria=["API contract is ready."],
+        )
+        orchestrator.create_task(
+            task_id="frontend", objective="Build frontend",
+            acceptance_criteria=["Frontend works."],
+            dependency_ids=["design"],
+        )
+        orchestrator.create_task(
+            task_id="backend", objective="Build backend",
+            acceptance_criteria=["Backend works."],
+            dependency_ids=["design"],
+        )
+        orchestrator.create_task(
+            task_id="integration", objective="Integrate app",
+            acceptance_criteria=["Integration works."],
+            dependency_ids=["frontend", "backend"],
+        )
+        finished = []
+        orchestrator.register_worker(
+            worker_id="architect", role="architect",
+            handler=lambda task: (
+                finished.append(task.task_id)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "designed")
+            ),
+        )
+        orchestrator.register_worker(
+            worker_id="builder", role="frontend-developer",
+            handler=lambda task: (
+                finished.append(task.task_id)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "frontend")
+            ),
+        )
+        orchestrator.register_worker(
+            worker_id="backend", role="backend-developer",
+            handler=lambda task: (
+                finished.append(task.task_id)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "backend")
+            ),
+        )
+        orchestrator.register_worker(
+            worker_id="integrator", role="integration-engineer",
+            handler=lambda task: (
+                finished.append(task.task_id)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "integrated")
+            ),
+        )
+        scheduler = TaskScheduler(orchestrator, max_concurrency=2)
+        result = scheduler.dispatch_plan(["design", "frontend", "backend", "integration"])
+        self.assertTrue(all(item.state == TaskState.COMPLETED for item in result.outcomes))
+        self.assertLess(finished.index("design"), finished.index("frontend"))
+        self.assertLess(finished.index("design"), finished.index("backend"))
+        self.assertLess(finished.index("frontend"), finished.index("integration"))
+        self.assertLess(finished.index("backend"), finished.index("integration"))
+
+    def test_dispatch_plan_leaves_dependants_queued_after_failed_prerequisite(self):
+        orchestrator = Orchestrator()
+        orchestrator.create_task(
+            task_id="design", objective="Design",
+            acceptance_criteria=["Design is ready."],
+        )
+        orchestrator.create_task(
+            task_id="build", objective="Build",
+            acceptance_criteria=["Build works."],
+            dependency_ids=["design"],
+        )
+        orchestrator.register_worker(
+            worker_id="architect", role="architect",
+            handler=lambda task: WorkerResult(WorkerResultStatus.ERROR, "failed"),
+        )
+        orchestrator.register_worker(
+            worker_id="builder", role="builder",
+            handler=lambda task: WorkerResult(WorkerResultStatus.COMPLETED, "built"),
+        )
+        result = TaskScheduler(orchestrator).dispatch_plan(["design", "build"])
+        self.assertEqual(result.outcomes[0].state, TaskState.FAILED)
+        self.assertEqual(result.outcomes[1].state, TaskState.QUEUED)
+        self.assertIn("prerequisite", result.outcomes[1].reason)
+
     def test_empty_batch_is_a_valid_noop(self):
         scheduler = TaskScheduler(Orchestrator())
         result = scheduler.dispatch_independent([])
