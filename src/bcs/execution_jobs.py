@@ -115,7 +115,7 @@ class ExecutionJobService:
             fully_completed = sum(
                 item.get("state") == "completed"
                 and item.get("qa", {}).get("status", "not_configured")
-                not in {"blocked", "repair_required", "failed"}
+                not in {"blocked", "repair_required", "failed", "error", "not_assessed"}
                 for item in outcomes
             )
             state = "completed" if fully_completed == len(outcomes) else (
