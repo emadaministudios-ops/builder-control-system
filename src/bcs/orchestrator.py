@@ -49,6 +49,7 @@ class WorkerTask:
     evidence_refs: tuple[str, ...]
     attempt: int = 1
     dependency_ids: tuple[str, ...] = ()
+    dependency_context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -265,8 +266,34 @@ class Orchestrator:
             self._persist_state(proposed.values())
             self._tasks = proposed
 
+        dependency_context = tuple(
+            __import__("json").dumps(
+                {
+                    "task_id": dependency,
+                    "objective": self._tasks[dependency].task.objective,
+                    "role": self._tasks[dependency].task.role,
+                    "summary": self._tasks[dependency].result.summary,
+                    "changed_files": list(self._tasks[dependency].result.changed_files),
+                    "evidence_refs": list(self._tasks[dependency].result.evidence_refs),
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            for dependency in record.task.dependency_ids
+        )
+        dispatched_task = WorkerTask(
+            task_id=record.task.task_id,
+            parent_task_id=record.task.parent_task_id,
+            role=record.task.role,
+            objective=record.task.objective,
+            acceptance_criteria=record.task.acceptance_criteria,
+            evidence_refs=record.task.evidence_refs,
+            attempt=record.task.attempt,
+            dependency_ids=record.task.dependency_ids,
+            dependency_context=dependency_context,
+        )
         try:
-            result = handler(record.task)
+            result = handler(dispatched_task)
             if not isinstance(result, WorkerResult) or not isinstance(
                 result.status, WorkerResultStatus
             ):
