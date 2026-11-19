@@ -51,6 +51,7 @@ class WorkerTask:
     attempt: int = 1
     dependency_ids: tuple[str, ...] = ()
     dependency_context: tuple[str, ...] = ()
+    workspace_group_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -163,6 +164,7 @@ class Orchestrator:
             acceptance_criteria=tuple(item.strip() for item in acceptance_criteria),
             evidence_refs=(),
             dependency_ids=tuple(dependency_ids),
+            workspace_group_id=task_id.strip(),
         )
         now = datetime.now(timezone.utc)
         record = TaskRecord(task, TaskState.QUEUED, created_at=now, updated_at=now)
@@ -198,6 +200,12 @@ class Orchestrator:
                 task = WorkerTask(
                     item.repair_task_id, item.parent_task_id, item.assigned_role,
                     item.objective, item.acceptance_criteria, item.evidence_refs,
+                    workspace_group_id=(
+                        proposed_tasks[item.parent_task_id].task.workspace_group_id
+                        or item.parent_task_id
+                        if item.parent_task_id in proposed_tasks
+                        else item.parent_task_id
+                    ),
                 )
                 proposed_tasks[task.task_id] = TaskRecord(
                     task, TaskState.QUEUED, created_at=now, updated_at=now
@@ -292,6 +300,7 @@ class Orchestrator:
             attempt=record.task.attempt,
             dependency_ids=record.task.dependency_ids,
             dependency_context=dependency_context,
+            workspace_group_id=record.task.workspace_group_id or record.task.task_id,
         )
         try:
             result = handler(dispatched_task)
@@ -351,6 +360,7 @@ class Orchestrator:
                 old.task_id, old.parent_task_id, old.role, old.objective,
                 old.acceptance_criteria, old.evidence_refs, old.attempt + 1,
                 old.dependency_ids,
+                workspace_group_id=old.workspace_group_id,
             )
             updated = TaskRecord(
                 task, TaskState.QUEUED, created_at=record.created_at,
