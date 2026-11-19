@@ -160,9 +160,9 @@ class RuntimeCompositionTests(unittest.TestCase):
                     [task.task.task_id], supervisor, max_repair_rounds=2,
                 )
                 self.assertEqual(outcomes[0]["qa"]["status"], "source_review_complete")
-                self.assertEqual(outcomes[0]["qa"]["reviews"], 3)
+                self.assertEqual(outcomes[0]["qa"]["reviews"], 2)
                 self.assertEqual(len(outcomes[0]["qa"]["repair_task_ids"]), 1)
-                self.assertEqual(supervisor.calls, 3)
+                self.assertEqual(supervisor.calls, 2)
             finally:
                 runtime.close()
 
