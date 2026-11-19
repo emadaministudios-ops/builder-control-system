@@ -18,8 +18,9 @@ if TYPE_CHECKING:
     from .orchestrator import TaskRecord
     from .qa_handoff import QAEscalation
     from .approvals import ApprovalRequest
+    from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 
 
 class StorageError(RuntimeError):
@@ -83,6 +84,15 @@ class SQLiteOrchestrationStore:
                                 payload TEXT NOT NULL CHECK (json_valid(payload))
                             )
                         """)
+                        self._connection.execute("""
+                            CREATE TABLE IF NOT EXISTS feedback_cycles (
+                                task_id TEXT NOT NULL,
+                                cycle_number INTEGER NOT NULL,
+                                qa_run_id TEXT NOT NULL UNIQUE,
+                                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                                PRIMARY KEY (task_id, cycle_number)
+                            )
+                        """)
                         self._connection.execute(
                             f"PRAGMA user_version = {_SCHEMA_VERSION}"
                         )
@@ -94,6 +104,29 @@ class SQLiteOrchestrationStore:
                                 status TEXT NOT NULL,
                                 expires_at TEXT NOT NULL,
                                 payload TEXT NOT NULL CHECK (json_valid(payload))
+                            )
+                        """)
+                        self._connection.execute("""
+                            CREATE TABLE IF NOT EXISTS feedback_cycles (
+                                task_id TEXT NOT NULL,
+                                cycle_number INTEGER NOT NULL,
+                                qa_run_id TEXT NOT NULL UNIQUE,
+                                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                                PRIMARY KEY (task_id, cycle_number)
+                            )
+                        """)
+                        self._connection.execute(
+                            f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                        )
+                elif version == 2:
+                    with self._connection:
+                        self._connection.execute("""
+                            CREATE TABLE IF NOT EXISTS feedback_cycles (
+                                task_id TEXT NOT NULL,
+                                cycle_number INTEGER NOT NULL,
+                                qa_run_id TEXT NOT NULL UNIQUE,
+                                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                                PRIMARY KEY (task_id, cycle_number)
                             )
                         """)
                         self._connection.execute(
@@ -259,6 +292,66 @@ class SQLiteOrchestrationStore:
                     """, escalation_rows)
             except sqlite3.Error as exc:
                 raise StorageError("Could not commit orchestration state.") from exc
+
+    @staticmethod
+    def _feedback_payload(record: "FeedbackCycle") -> dict:
+        return {
+            "version": 1,
+            "task_id": record.task_id,
+            "qa_run_id": record.qa_run_id,
+            "cycle_number": record.cycle_number,
+            "report_status": record.report_status.value,
+            "state": record.state.value,
+            "instruction": record.instruction,
+        }
+
+    @staticmethod
+    def _decode_feedback(payload: str):
+        from .feedback import FeedbackCycle, FeedbackState
+        from .qa import QACheckStatus
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported feedback-cycle record version.")
+            number = data["cycle_number"]
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise ValueError("Invalid feedback-cycle number.")
+            return FeedbackCycle(
+                task_id=data["task_id"],
+                qa_run_id=data["qa_run_id"],
+                cycle_number=number,
+                report_status=QACheckStatus(data["report_status"]),
+                state=FeedbackState(data["state"]),
+                instruction=data["instruction"],
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StorageError("Stored feedback-cycle record is invalid or unsupported.") from exc
+
+    def save_feedback_cycle(self, record: "FeedbackCycle") -> None:
+        payload = self._feedback_payload(record)
+        encoded = self._json(payload)
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute("""
+                        INSERT INTO feedback_cycles
+                            (task_id, cycle_number, qa_run_id, payload)
+                        VALUES (?, ?, ?, ?)
+                    """, (
+                        record.task_id, record.cycle_number,
+                        record.qa_run_id, encoded,
+                    ))
+            except sqlite3.IntegrityError as exc:
+                raise StorageError("Feedback cycle already exists; reload task history.") from exc
+            except sqlite3.Error as exc:
+                raise StorageError("Could not commit feedback-cycle record.") from exc
+
+    def list_feedback_cycles(self):
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM feedback_cycles ORDER BY task_id, cycle_number"
+            ).fetchall()
+        return tuple(self._decode_feedback(row["payload"]) for row in rows)
 
     @staticmethod
     def _approval_payload(record: "ApprovalRequest") -> dict:
