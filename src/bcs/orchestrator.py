@@ -312,6 +312,15 @@ class Orchestrator:
                 raise TypeError("Worker returned an invalid result contract")
             if not isinstance(result.summary, str) or not result.summary.strip():
                 raise ValueError("Worker result summary is required")
+            if result.consultation_disposition not in {
+                "followed", "partially_followed", "not_followed", "unknown"
+            }:
+                raise ValueError("Worker consultation disposition is invalid")
+            if (
+                not isinstance(result.consultation_reason, str)
+                or len(result.consultation_reason) > 2000
+            ):
+                raise ValueError("Worker consultation reason is invalid")
             for path in result.changed_files:
                 if not isinstance(path, str):
                     raise ValueError("Worker changed-file paths must be strings")
