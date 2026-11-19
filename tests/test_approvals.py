@@ -259,7 +259,7 @@ class PersistentApprovalServiceTests(unittest.TestCase):
             migrated = SQLiteOrchestrationStore(path)
             self.assertEqual(migrated.list_approvals(), ())
             version = migrated._connection.execute("PRAGMA user_version").fetchone()[0]
-            self.assertEqual(version, 9)
+            self.assertEqual(version, 10)
             migrated.close()
 
 
