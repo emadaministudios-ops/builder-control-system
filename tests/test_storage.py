@@ -187,7 +187,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             connection.close()
             with SQLiteOrchestrationStore(path) as store:
                 version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-                self.assertEqual(version, 5)
+                self.assertEqual(version, 6)
                 self.assertEqual(store.list_consultations(), ())
 
     def test_memory_database_supported(self):
