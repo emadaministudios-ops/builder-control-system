@@ -321,6 +321,56 @@ def create_app(
             "tasks": [_task_view(record) for record in records],
         }
 
+    @app.post("/v1/builds", status_code=status.HTTP_202_ACCEPTED)
+    def create_and_run_build(
+        payload: PlanCreateInput,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "tasks:create")
+        require_scope(principal, "tasks:execute")
+        if principal.actor_type.value != "human":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only an authenticated human may start a complete BCS build.",
+            )
+        criteria = payload.acceptance_criteria or [
+            "Satisfy the original user objective without weakening explicit constraints.",
+            "Complete specialist work, QA review and bounded repairs where needed.",
+            "Report unexecuted tests, blockers and unresolved limitations honestly.",
+        ]
+        try:
+            plan, records = active_runtime.plan_and_create_tasks(
+                payload.objective, criteria
+            )
+            job = active_job_service.enqueue(
+                [record.task.task_id for record in records], principal.actor_id
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="BCS could not plan or enqueue this build.",
+            ) from exc
+        return {
+            "plan": {
+                "objective": plan.objective,
+                "acceptance_criteria": list(plan.acceptance_criteria),
+                "execution_order": list(plan.execution_order),
+                "steps": [
+                    {
+                        "step_id": step.step_id,
+                        "role": step.role,
+                        "objective": step.objective,
+                        "acceptance_criteria": list(step.acceptance_criteria),
+                        "depends_on": list(step.depends_on),
+                    }
+                    for step in plan.steps
+                ],
+            },
+            "task_ids": [record.task.task_id for record in records],
+            "job": _json_value(job),
+            "status_url": f"/v1/execution-jobs/{job['job_id']}",
+        }
+
     @app.post("/v1/tasks/dispatch", status_code=status.HTTP_202_ACCEPTED)
     def dispatch_tasks(
         payload: TaskDispatchInput,
