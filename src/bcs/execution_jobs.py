@@ -13,7 +13,7 @@ from uuid import uuid4
 
 
 class ExecutionJobService:
-    def __init__(self, store, scheduler, *, worker_id=None, lease_seconds=300,
+    def __init__(self, store, scheduler, *, execution_handler=None, worker_id=None, lease_seconds=300,
                  poll_seconds=0.5):
         if not callable(getattr(store, "enqueue_execution_job", None)):
             raise TypeError("A durable execution-job store is required.")
@@ -25,6 +25,9 @@ class ExecutionJobService:
             raise ValueError("poll_seconds must be between 0.05 and 30.")
         self.store = store
         self.scheduler = scheduler
+        if execution_handler is not None and not callable(execution_handler):
+            raise TypeError("execution_handler must be callable when provided.")
+        self.execution_handler = execution_handler
         self.worker_id = worker_id or "bcs-job-worker-" + uuid4().hex
         self.lease_seconds = lease_seconds
         self.poll_seconds = float(poll_seconds)
@@ -86,21 +89,26 @@ class ExecutionJobService:
         beat = threading.Thread(target=heartbeat, name="bcs-job-heartbeat", daemon=True)
         beat.start()
         try:
-            result = self.scheduler.dispatch_plan(job["task_ids"])
-            outcomes = [{
-                "task_id": item.task_id,
-                "state": item.state.value,
-                "worker_id": item.worker_id,
-                "reason": item.reason[:2000],
-                "result": None if item.result is None else {
-                    "status": item.result.status.value,
-                    "summary": item.result.summary[:12000],
-                    "changed_files": list(item.result.changed_files)[:200],
-                    "evidence_refs": list(item.result.evidence_refs)[:200],
-                    "blockers": list(item.result.blockers)[:100],
-                },
-            } for item in result.outcomes]
-            completed = sum(item["state"] == "completed" for item in outcomes)
+            if self.execution_handler is not None:
+                outcomes = self.execution_handler(job)
+            else:
+                result = self.scheduler.dispatch_plan(job["task_ids"])
+                outcomes = [{
+                    "task_id": item.task_id,
+                    "state": item.state.value,
+                    "worker_id": item.worker_id,
+                    "reason": item.reason[:2000],
+                    "result": None if item.result is None else {
+                        "status": item.result.status.value,
+                        "summary": item.result.summary[:12000],
+                        "changed_files": list(item.result.changed_files)[:200],
+                        "evidence_refs": list(item.result.evidence_refs)[:200],
+                        "blockers": list(item.result.blockers)[:100],
+                    },
+                } for item in result.outcomes]
+            if not isinstance(outcomes, list) or not outcomes or len(outcomes) > 100:
+                raise ValueError("Execution handler returned an invalid outcome list.")
+            completed = sum(item.get("state") == "completed" and item.get("qa", {}).get("status", "not_configured") not in {"blocked", "repair_required", "failed"} for item in outcomes)
             state = "completed" if completed == len(outcomes) else (
                 "partial" if completed else "failed"
             )
