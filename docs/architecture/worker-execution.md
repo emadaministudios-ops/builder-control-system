@@ -129,3 +129,12 @@ Registered model workers now receive a controller-owned consultation callback. B
 ### Durable specialist consultation audit
 
 SQLite schema version 4 adds a dedicated specialist consultation history table. BRAIN routing decisions are recorded whether consultation is skipped or requested. When advice is obtained, the record includes the requesting role, selected specialist, focused question, routing rationale, advice, risks, next steps, confidence, task ID and timezone-aware timestamp. The runtime exposes `consultation_history(task_id=None)` for inspection. Existing schema version 3 databases migrate by creating the new table without rewriting existing task, approval, escalation or feedback records. Consultation history is an audit trail; recommendations remain advisory and do not themselves authorize actions.
+
+
+## Consultation outcome feedback
+
+Consultation decisions, specialist advice, worker-reported adoption and QA results are stored as separate records. A trusted controller can append an outcome with `record_consultation_outcome(...)`; the worker disposition is explicitly self-reported (followed, partially followed, not followed, or unknown). It is never treated as proof that the advice worked.
+
+QA assessment is a separate field and requires a QA run identifier. Only controller-supplied QA status and evidence references are accepted; the worker cannot mark its own advice successful. Outcomes are append-only and linked by consultation ID and task ID, with a foreign key preventing orphan records. The schema migration is version 5.
+
+This is an auditable feedback foundation, not model training or a claim that BCS has learned a generally reusable rule. The next integration step is to attach verified outcomes to repair-task prompts using project-scoped lineage and to evaluate advice against later QA evidence.
