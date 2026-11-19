@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#10151f">
+  <title>BCS · Builder Control System</title>
+  <link rel="stylesheet" href="./style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <a class="brand" href="#"><span class="brand-mark">B</span><span>BCS<small>BUILDER CONTROL SYSTEM</small></span></a>
+      <nav aria-label="Main navigation">
+        <a class="active" href="#overview">◫ <span>Overview</span></a>
+        <a href="#build">✳ <span>New build</span></a>
+        <a href="#work">▤ <span>Work & agents</span></a>
+        <a href="#reviews">✓ <span>Approvals & QA</span></a>
+        <a href="#integrations">⌘ <span>Integrations</span></a>
+      </nav>
+      <div class="sidebar-bottom">
+        <span class="live-dot"></span><span>Control plane</span>
+        <p>Development environment</p>
+      </div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><span class="eyebrow">WORKSPACE / DEVELOPMENT</span><h1>Command centre</h1></div>
+        <div class="top-actions"><span class="branch">⑂ development only</span><button id="refresh" class="button quiet">↻ Refresh</button></div>
+      </header>
+      <section id="notice" class="notice hidden" role="status"></section>
+      <section class="connect panel" id="connection-panel">
+        <div><span class="eyebrow">SECURE CONNECTION</span><h2>Connect to your BCS control API</h2><p>Your bearer token stays in this browser tab and is never saved to the repository.</p></div>
+        <form id="connect-form"><label>BCS API address<input id="api-url" type="url" placeholder="https://bcs-api-development.up.railway.app" autocomplete="url"></label><p class="item-meta">This must be your BCS server URL only. Never paste an OpenAI key into this field.</p><label>Bearer token<input id="api-token" type="password" placeholder="Paste API token" autocomplete="off" required></label><button class="button primary" type="submit">Connect securely</button></form><div class="item-meta" style="margin-top:14px"><strong>OpenAI model setup is separate.</strong> Add your replacement key in Railway → bcs-api → Variables as <code>OPENAI_API_KEY</code>. Do not enter it here; BCS reads it on the server. The API address above and your BCS bearer token are only for dashboard access.</div>
+      </section>
+      <section id="overview" class="stats">
+        <article class="stat panel"><span>Tasks</span><strong id="stat-tasks">—</strong><small>Across this runtime</small></article>
+        <article class="stat panel"><span>Active jobs</span><strong id="stat-jobs">—</strong><small>Queued or running</small></article>
+        <article class="stat panel"><span>Pending approvals</span><strong id="stat-approvals">—</strong><small>Human decisions required</small></article>
+        <article class="stat panel"><span>Integrations</span><strong id="stat-integrations">—</strong><small>Awaiting QA / reviewed</small></article>
+      </section>
+      <section id="build" class="panel build-panel">
+        <div class="section-heading"><div><span class="eyebrow">BRAIN · BUILD ORCHESTRATION</span><h2>What should BCS build?</h2><p>Describe the outcome in plain language. BRAIN will plan specialist work and queue execution.</p></div><span class="pill">No BCS coins or tiers</span></div>
+        <form id="build-form"><label for="objective">Your instruction</label><textarea id="objective" rows="5" maxlength="20000" placeholder="Describe the app, feature, repair or complex task. Include constraints and what done looks like…" required></textarea><label for="criteria">Acceptance criteria <small>(optional · one per line)</small></label><textarea id="criteria" rows="2" placeholder="What must be true when the work is complete?"></textarea><div class="form-footer"><span>Runs on the configured model provider and isolated development worktrees.</span><button class="button primary" type="submit" id="build-submit">✳ Plan & start build</button></div></form>
+        <div id="build-result" class="result hidden"></div>
+      </section>
+      <section id="work" class="panel">
+        <div class="section-heading"><div><span class="eyebrow">LIVE WORK</span><h2>Tasks & agent activity</h2></div><span class="subtle" id="last-updated">Not connected</span></div>
+        <div class="table-wrap"><table><thead><tr><th>Task</th><th>Specialist</th><th>Status</th><th>Updated</th></tr></thead><tbody id="tasks-body"><tr><td colspan="4" class="empty">Connect to load tasks.</td></tr></tbody></table></div>
+        <div class="section-heading subhead"><div><h3>Execution queue</h3><p>Background jobs remain available if you close the browser.</p></div></div>
+        <div id="jobs-list" class="stack"><p class="empty">No job data loaded.</p></div>
+      </section>
+      <section id="reviews" class="panel">
+        <div class="section-heading"><div><span class="eyebrow">HUMAN CONTROL</span><h2>Approvals & release gates</h2><p>Only a human can approve sensitive actions.</p></div></div>
+        <div id="approvals-list" class="stack"><p class="empty">No approval data loaded.</p></div>
+      </section>
+      <section id="integrations" class="panel">
+        <div class="section-heading"><div><span class="eyebrow">QUALITY & DELIVERY</span><h2>Integration work</h2><p>Integration QA requires a server-configured QA profile. Promotion is restricted to development.</p></div></div>
+        <div id="integrations-list" class="stack"><p class="empty">No integration data loaded.</p></div>
+        <div class="section-heading subhead"><div><h3>Promotion history</h3></div></div>
+        <div id="promotions-list" class="stack"><p class="empty">No promotion history loaded.</p></div>
+      </section>
+      <footer><span>BCS · Built for bounded autonomy</span><span>main remains protected · Human approval for promotion</span></footer>
+    </main>
+  </div>
+  <script src="./app.js" defer></script>
+</body>
+</html>

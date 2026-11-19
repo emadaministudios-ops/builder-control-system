@@ -1,0 +1,45 @@
+name: Publish BCS dashboard preview
+
+on:
+  push:
+    branches:
+      - development
+    paths:
+      - "dashboard/**"
+      - ".github/workflows/dashboard-pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: bcs-dashboard-pages
+  cancel-in-progress: true
+
+jobs:
+  publish:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out development
+        uses: actions/checkout@v4
+        with:
+          ref: development
+      - name: Prepare static dashboard
+        run: |
+          mkdir -p _site
+          cp dashboard/index.html dashboard/app.js dashboard/style.css _site/
+          touch _site/.nojekyll
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - name: Publish dashboard
+        id: deployment
+        uses: actions/deploy-pages@v4

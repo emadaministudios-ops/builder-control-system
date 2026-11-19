@@ -1,0 +1,207 @@
+# Worker execution and QA supervision
+
+This document describes the current development-stage execution components. It is not a production deployment guide.
+
+## Durable QA evidence
+
+The SQLite store uses schema version 11 and persists execution evidence artifacts in `qa_evidence_artifacts`. Each artifact stores the exact captured stdout and stderr, byte size, content SHA-256 digest, kind and immutable evidence reference. Writes validate the supplied size and digest; duplicate references are idempotent only for identical content, and a reference cannot be rebound to different output. The runtime's `EvidenceStore` uses SQLite as its durable repository and verifies size and digest again when loading an artifact after restart. The default per-artifact limit is 200 KB (configurable up to 2 MB); the database itself is not an object-storage service and production retention, encryption-at-rest, access controls, backup and capacity management remain deployment responsibilities.
+
+Integration QA assessments retain their evidence references and exact integration commit binding. Because the evidence artifacts are now durable, the referenced stdout/stderr can be recovered after a runtime restart rather than leaving only dangling references. A passed assessment still requires at least one actually executed check and all checks passing; static-only review remains `not_assessed`.
+
+## Durable background execution jobs
+
+The authenticated API accepts dispatch requests by writing an `execution_jobs` record to SQLite and returning HTTP 202 with a job ID. `ExecutionJobService` runs outside the request, claims queued or expired-running jobs with an atomic SQLite transaction and expiring lease, renews leases while dispatch is active, and commits terminal outcomes only when the lease owner and attempt still match. A replacement worker can reclaim a job after lease expiry; a stale worker cannot overwrite the replacement worker's result. `GET /v1/execution-jobs` and `GET /v1/execution-jobs/{job_id}` expose requester-scoped status. The API validates that submitted tasks exist, IDs are unique, and all task prerequisites are included before enqueue.
+
+When a trusted Git manager and model provider are configured, the API injects a BCS execution handler into the durable job runner. It dispatches the requested dependency plan, then sends each completed specialist result through the three-pass read-only QA supervisor. Findings create bounded repair tasks; repair outcomes are folded into the original review context and independently reviewed again. A job records per-task QA status and becomes partial when QA is blocked or findings remain open. When no trusted Git manager/provider is configured, the runner retains the basic dependency-aware dispatch path and marks QA as not configured. The automatic API workflow currently performs model-assisted source review only; it does not infer or run project test commands. Controller-configured Docker checks remain a separate explicit QA execution path.
+
+This is at-least-once execution, not exactly-once: a crash after workspace side effects but before job completion can cause task IDs to be revisited. The orchestrator marks tasks that were `running` at process restart as failed with an unknown-outcome warning; operators must inspect the workspace before retrying. The SQLite lease and runner are a single-instance development implementation, not distributed cloud coordination. Production multi-replica hosting needs shared PostgreSQL/Redis queue semantics, distributed leases, observability and explicit recovery procedures.
+
+## Bounded autonomous QA repair loop
+
+The runtime exposes `execute_with_qa(task_id, supervisor, ...)` for a queued task with registered specialist workers. It dispatches the original worker, runs optional controller-configured executable QA, asks the three-pass QA supervisor to review the original objective and changed files, combines both result sets into one feedback cycle, creates repair tasks from failed checks/findings, dispatches those tasks, merges their changed-file/evidence references into the review context, and repeats tests plus source review after each repair. The feedback controller requires at least two distinct combined QA reports before it can return its policy-level `VERIFIED` state. Blocked QA, blocked/failed repair workers, exhausted feedback cycles and the configured repair-round limit stop the loop without a success claim.
+
+Repair tasks inherit the parent's `workspace_group_id`. The trusted workspace factory must map this stable group to the same project checkout so that repair edits are visible to the next QA review. Independent concurrent tasks must still receive isolated worktrees or branches.
+
+**Verification boundary:** the three-pass supervisor performs model-assisted source inspection and emits static, explicitly non-executed QA checks. When `executable_checks` and the complete trusted Docker/workspace configuration are supplied to `execute_with_qa`, BCS runs those controller-defined `QACheckSpec` commands before every review cycle, combines their actual outcomes and retained stdout/stderr evidence with the source review, and routes failed checks into the same bounded repair loop. In supervised mode, `tests.run` requires human approval; a blocked approval becomes a QA escalation and stops the loop. If executable checks are omitted, the loop remains source-review-only and its completion reason explicitly states that no executable tests were configured. A `VERIFIED` feedback state is not release approval and does not prove behavior outside the configured checks.
+
+## BRAIN planning and dependency-aware execution
+
+The runtime exposes `plan_and_create_tasks(objective, acceptance_criteria)`. BRAIN asks the configured model to split the request into bounded specialist steps. Deterministic validation rejects unsupported roles, malformed steps, missing acceptance criteria, unknown dependencies, duplicate IDs, and dependency cycles. The validated plan is persisted as individual tasks with explicit prerequisite IDs.
+
+The authenticated API exposes the same workflow through `POST /v1/plans`. Only a human principal with the `tasks:create` scope may submit a top-level plan.
+
+Run a validated plan with:
+
+```python
+plan, records = runtime.plan_and_create_tasks(
+    "Build the requested feature",
+    ["The existing login flow remains intact."],
+)
+result = runtime.scheduler.dispatch_plan(
+    [record.task.task_id for record in records]
+)
+```
+
+The scheduler executes dependency-ready waves, parallelizing independent tasks up to the configured concurrency ceiling. The orchestrator independently checks prerequisites at dispatch time, so a direct dispatch call cannot bypass the dependency gate. If a prerequisite fails, is blocked, or has no available worker, its dependants remain queued rather than being treated as complete. When a prerequisite completes, BCS passes its verified task ID, objective, specialist role, result summary, changed-file list and evidence references into the dependent worker's task context. This gives downstream agents the actual outputs they need instead of asking them to rediscover prior work.
+
+The runtime now protects model-worker mutations with an in-process exclusive lease keyed by the canonical workspace root. If two tasks resolve to the same mutable checkout, their worker execution is serialized; separate worktree roots remain parallel. The exact workspace instance selected for the lease is reused by the worker gateway, avoiding factory reallocation between lock selection and editing. This prevents concurrent same-process writes to a shared root, but does not merge changes or detect semantic/file-level conflicts. Multi-process deployments must supply a distributed lease mechanism, and production workspace provisioning should still allocate separate Git worktrees for independent tasks. The scheduler does not yet infer file-level conflicts or automatically allocate separate Git worktrees. The trusted workspace factory remains responsible for allocating distinct worktrees when independent parallel edits are desired; same-root workers are serialized by the runtime lease manager. Each task also carries a stable `workspace_group_id`; QA-created repair tasks inherit the original task's group. A production workspace factory must resolve that group to the same project checkout for repair/retest, while still isolating independent concurrent tasks in separate worktrees or branches.
+
+## Model-backed specialist workers
+
+`BCSRuntime.register_model_worker(...)` registers a role-specific worker using the runtime's configured provider registry. The caller must supply a trusted `workspace_factory(task)` that returns the isolated `Workspace` assigned to that task.
+
+Example:
+
+```python
+from pathlib import Path
+from bcs.policy import OperatingMode
+from bcs.runtime import create_runtime
+from bcs.workspace import Workspace
+
+runtime = create_runtime()
+runtime.register_model_worker(
+    worker_id="frontend-worker-1",
+    role="frontend-developer",
+    workspace_factory=lambda task: Workspace(
+        workspace_id=f"workspace-{task.task_id}",
+        root=Path("/srv/bcs/workspaces/project-a"),
+    ),
+    mode=OperatingMode.AUTONOMOUS,
+)
+```
+
+This example uses a trusted workspace root supplied by the application. A real deployment must allocate a distinct worktree or directory for each concurrently active task; do not point independent workers at the same mutable directory.
+
+The worker:
+- Sends the original objective and acceptance criteria to the selected model.
+- Requires a strict JSON proposal.
+- Enforces file-count and content-size limits.
+- Sends every proposed file write through `WorkspaceToolGateway`.
+- Cannot execute shell commands, access secrets, or grant itself capabilities.
+- Returns blocked when policy denies a write or a human approval is pending.
+
+Current limitation: the worker does not yet have a complete iterative tool loop for reading arbitrary project context, running tests, receiving QA findings and repairing automatically. It currently accepts structured file-edit proposals. Do not interpret a model response as proof that code works.
+
+## Integration of completed worker branches
+
+`GitIntegrationCoordinator` can snapshot dirty, completed worker work onto each worker group's own branch, then create a separate `bcs/integration/` worktree from the configured `development` base and cherry-pick those branch commits into it. The caller supplies the exact workspace group IDs to include; the coordinator does not infer completion or select tasks on its own. It refuses credential-like filenames such as `.env`, `.npmrc`, private-key names and common credentials files before staging.
+
+If Git reports a content conflict, the coordinator aborts the in-progress cherry-pick and returns the conflicting paths. Worker branches remain unchanged; already-applied commits remain only on the isolated integration branch. A conflict result must be resolved by a repair/integration worker and reviewed again.
+
+A conflict-free result is marked `awaiting_qa`, not passed or releasable. The coordinator does not push, update `development`, update `main`, or approve promotion. QA execution, durable integration-run records, restart recovery and explicit human promotion approval remain separate follow-up work. The integration coordinator is currently an explicit controller service, not automatically invoked by every completed task. `BCSRuntime.integrate_completed_work(...)` is the guarded runtime entry point: it checks the durable orchestration snapshot and refuses integration if any task in a requested workspace group is queued, running, blocked or failed. Only groups whose tasks are all completed are passed to the Git coordinator. This completion gate is separate from QA: the returned branch remains `awaiting_qa`, and the runtime does not promote it.
+
+Integration outcomes are now stored in SQLite in the version-6 `integration_runs` table. The runtime exposes `integration_history()` to recover completed integration records after restart, and rejects reuse of an integration ID already present in durable history. Records preserve branch, worktree path, status, included workspace groups, commit SHAs, conflict paths and the controller's reason. This is durable result history, not yet a crash-atomic Git/database transaction: a process failure after creating the Git branch but before recording the result can leave an unrecorded branch. QA reports are not yet durably linked to integration IDs, and promotion remains a separate human-approved operation.
+ 
+## Controller-managed Git worktrees
+
+A controller-owned `GitWorktreeManager` provides the trusted workspace factory needed by model workers. Construct it with an explicit repository root and a worktree storage directory outside that repository, then pass `manager.workspace_for_task` as the trusted `workspace_factory` to `register_model_worker`. It creates isolated directories and dedicated branches from `development`, keyed by stable workspace group IDs. QA repair tasks therefore return to the original project's worktree, while unrelated project groups get separate worktrees. The runtime lease serializes tasks that share a physical checkout.
+
+The manager exposes status, changed-file and diff inspection. It refuses cleanup of dirty worktrees and never commits, merges, pushes or promotes changes. Its registry is currently process-local/in-memory; restart reconciliation and distributed multi-process allocation remain follow-up work. Git worktree integration is tested against temporary repositories in CI, not against a live user project.
+
+## Bounded parallel scheduling
+
+`runtime.scheduler.dispatch_independent(task_ids)` dispatches a caller-selected batch concurrently up to the configured `max_concurrency` ceiling. The default is two.
+
+Only submit tasks known to be independent. The current scheduler does not yet calculate a dependency graph or detect overlapping file ownership. The workspace factory must provide separate task workspaces. Queue size and concurrency are operational safeguards, not user-facing usage tiers or credits.
+
+## Three-pass QA supervisor
+
+Create a read-only QA supervisor with a trusted workspace factory:
+
+```python
+supervisor = runtime.create_qa_supervisor(
+    workspace_factory=trusted_qa_workspace_factory,
+)
+review, report, feedback, repair_task_ids = runtime.review_and_handoff(
+    worker_task,
+    worker_result,
+    supervisor,
+)
+```
+
+The supervisor performs three model-assisted passes:
+1. Derives observable requirements from the original objective and acceptance criteria.
+2. Compares the worker's changed files against every requirement and proposes actionable findings.
+3. Audits the initial critique against the original objective to look for missed requirements, false positives and weak repair guidance.
+
+The supervisor is read-only. It cannot modify the implementation, run tests, approve releases or declare a test pass. A review with no findings is marked `ready_for_tests`, not passed. The generated QA report explicitly marks these checks as non-executed static review.
+
+When findings or failed executable checks exist, BCS persists the combined feedback cycle and creates repair tasks through deterministic QA handoff rules. The autonomous loop dispatches those tasks, reruns configured executable checks, and re-reviews the original task within the configured repair-round bound.
+
+## Provider configuration
+
+Configure one or both providers through environment variables:
+
+- Local Ollama: `BCS_OLLAMA_MODEL` and optional `BCS_OLLAMA_BASE_URL` (default `http://127.0.0.1:11434/v1`).
+- Cloud: `BCS_CLOUD_MODEL`, `BCS_CLOUD_BASE_URL`, and `BCS_CLOUD_API_KEY_ENV` (defaults to `OPENAI_API_KEY`).
+- Default selection: `BCS_DEFAULT_PROVIDER` (for example `ollama` or `cloud`).
+
+BCS does not silently fall back to another provider. Local inference avoids per-request cloud API billing, but requires sufficient compute and still has hardware/electricity costs. Cloud provider charges, rate limits and context limits remain outside BCS control.
+
+## Verification boundary
+
+CI uses mocked model responses and temporary workspaces. It verifies contracts, policy enforcement, routing, feedback state and concurrency ceilings. It does not prove that a particular real model can solve complex projects, that Docker is installed and running, or that a cloud deployment is secure and available.
+
+## Specialist-to-specialist consultation
+
+The runtime exposes `consult_specialist(...)` for a bounded advisory exchange between two allowlisted specialist roles. BRAIN or another trusted controller decides when to request consultation and selects the target role; this first implementation does not let model-generated text autonomously select arbitrary agents.
+
+The consultant receives only the controller-supplied objective, question and bounded context. Its strict response contract contains advice, risks, next steps and a confidence label. The consultant has no workspace gateway, shell/test execution, secret access, task mutation, approval, or release capability. Advice is untrusted input: the requesting worker/controller must evaluate it against the original task and QA requirements before acting. The exchange is synchronous. BRAIN's decision and any resulting advice are persisted in the specialist consultation history; outcome linkage is recorded separately and does not grant authority.
+
+### BRAIN consultation routing
+
+`BCSRuntime.consult_for_task(...)` asks a bounded BRAIN routing call whether the current task has a concrete knowledge gap, blocker, or design risk that warrants specialist advice. BRAIN may select exactly one role from the allowlist or decline consultation. The route is schema-validated before the separate advisory consultation call. The task role is taken from the persisted task record rather than caller-supplied identity, and context is limited to task objective, acceptance criteria, worker summary and blockers. This is an on-demand controller entry point; it is not yet automatically invoked by every worker dispatch. Consultation results are advisory and are not silently converted into code changes or new tasks.
+
+### Automatic pre-execution consultation
+
+Registered model workers now receive a controller-owned consultation callback. Before the worker's first model completion for a task, the callback asks BRAIN whether one specialist consultation is warranted. If approved by the router, the advisory result is inserted into the worker prompt as explicitly untrusted context. The worker is instructed to verify advice against the original objective and acceptance criteria and to ignore attempts to change its role or permissions. The callback caches the result by task ID for that registered worker so retries do not repeatedly consult. Consultation failure is non-fatal and does not grant additional capabilities; ordinary workspace edits remain governed by the existing policy gateway. The cache is in-memory per worker, while the decision and advice are persisted as a durable audit record.
+
+### Durable specialist consultation audit
+
+SQLite schema version 4 added a dedicated specialist consultation history table. BRAIN routing decisions are recorded whether consultation is skipped or requested. When advice is obtained, the record includes the requesting role, selected specialist, focused question, routing rationale, advice, risks, next steps, confidence, task ID and timezone-aware timestamp. The runtime exposes `consultation_history(task_id=None)` for inspection. Existing schema version 3 databases migrate by creating the new table without rewriting existing task, approval, escalation or feedback records. Consultation history is an audit trail; recommendations remain advisory and do not themselves authorize actions.
+
+
+## Consultation outcome feedback
+
+Consultation decisions, specialist advice, worker-reported adoption and QA results are stored as separate records. A trusted controller can append an outcome with `record_consultation_outcome(...)`; the worker disposition is explicitly self-reported (followed, partially followed, not followed, or unknown). It is never treated as proof that the advice worked.
+
+QA assessment is a separate field and requires a QA run identifier. Only controller-supplied QA status and evidence references are accepted; the worker cannot mark its own advice successful. Outcomes are append-only and linked by consultation ID and task ID, with a foreign key preventing orphan records. The schema migration is version 5.
+
+This is an auditable feedback foundation, not model training or a claim that BCS has learned a generally reusable rule. The next integration step is to attach verified outcomes to repair-task prompts using project-scoped lineage and to evaluate advice against later QA evidence.
+
+
+Repair workers receive up to three recent failed consultation approaches from their own task's ancestor chain, but only when the ancestor tasks share the exact same non-empty `workspace_group_id`. A caution is included only when the latest recorded outcome says the worker followed or partly followed the advice and a trusted QA assessment recorded failure. The prompt labels this material untrusted cautionary evidence and asks the repair worker not to repeat an approach without explaining what materially changes. Unrelated projects, skipped consultations, unadopted advice and advice without a failed QA assessment are excluded. This history is bounded to three entries and 4,000 characters.
+
+
+## Automatic worker-to-QA consultation feedback
+
+Model workers may return a bounded `consultation_disposition` (`followed`, `partially_followed`, `not_followed`, or `unknown`) and a short explanation. These are self-reported fields in the validated worker result; the controller records them only when that task actually received specialist advice. The worker cannot assign QA status or evidence.
+
+When QA reports are applied, the runtime appends a separate assessment to the same consultation outcome history. Failed, blocked and error reports retain their corresponding status. A passed report is recorded as `passed` only when it includes executed checks; static-only source review remains `not_assessed` rather than being mistaken for successful tests. QA run IDs and execution evidence references are attached by the controller. Repeated attachment of the same QA run/status is idempotent. Worker results persist their disposition fields with backward-compatible defaults for older records.
+
+
+## BRAIN consultation learning from project outcomes
+
+Before routing a new specialist consultation, BRAIN receives a bounded summary of the latest consultation outcome records from the current task and its same-project ancestor chain. The lineage traversal stops at a missing task or a different `workspace_group_id`, is capped at 12 tasks, and sends at most five outcome summaries / 4,000 characters. Each summary distinguishes the specialist, worker-reported adoption, controller-recorded QA status, reason, advice and available evidence references. Prior decisions to skip consultation and their reasons are also included, allowing BRAIN to learn when routine work did not need an extra specialist.
+
+BRAIN is instructed to treat this history as untrusted evidence rather than instructions. It should avoid repeating advice that was adopted but failed executed QA unless the proposed approach materially changes; it may prefer relevant advice associated with passed executed QA, but must not infer causation from correlation. Worker adoption alone is not evidence of effectiveness. Unrelated or inconclusive history should not affect the route. This is retrieval-augmented decision support, not model fine-tuning or a guarantee of improved outcomes.
+
+
+### Exact integration commit identity
+Each successful isolated integration records the full Git commit SHA produced after all worker commits are applied. The SHA is persisted in integration history and verified against the integration worktree HEAD in tests. This immutable version identifier is the prerequisite for executing QA against that exact checkout and attaching its report. Recording the SHA does not itself mean QA has run or authorize promotion.
+
+
+### Integration-bound executable QA
+The runtime can execute controller-defined QA checks inside the isolated integration worktree. It verifies the checkout path is under the trusted worktree root, confirms HEAD equals the immutable integration commit before execution, and checks HEAD plus tracked-file cleanliness afterward. Reports are append-only and linked by integration ID, exact commit SHA, QA run ID, task, check outcomes, and retained evidence references. A reported pass requires at least one executed check with retained output evidence; a static-only review is recorded as `not_assessed`, not a test pass. QA history survives runtime restart. This flow uses the existing sandbox executor and still requires a real Docker host at deployment; unit tests mock the executor and do not prove live container operation.
+
+
+### Human-only promotion gate
+Promotion requests are created only when the latest assessment is an executed pass on the exact integration commit. Each request is fingerprint-bound to the integration ID, commit SHA, QA run ID, target branch, and the development branch base SHA observed when approval was requested. The target is hard-restricted to `development`; `main` is not an allowed target. The existing approval service requires an authenticated human actor, and the promotion executor independently verifies the approval fingerprint, latest QA result, integration checkout, clean development worktree, unchanged base SHA, and fast-forward ancestry before updating development. It performs no remote push. Promotion requests and their outcome are durable. The promotion operation is not invoked automatically; creating a request does not change any Git branch.
+
+
+### Authenticated integration control-plane API
+The FastAPI control plane exposes authenticated integration history, per-integration QA history, and promotion-request history under `/v1`. A human principal with `integrations:promote` may request promotion and explicitly execute a promotion after the separate `approvals:decide` workflow has approved the exact request. The API derives the approver identity from the configured bearer-token principal; actor identity and actor type are not accepted from request payloads. A trusted `GitWorktreeManager` must be injected by server configuration. Repository roots, worktree paths, and branch targets are never accepted from API clients. If no manager is configured, promotion endpoints return service unavailable rather than attempting an implicit local checkout. The API does not deploy or push to a remote.
+
+
+### Durable integration QA jobs
+Integration QA requests use the shared SQLite-backed execution-job queue rather than executing inside the HTTP request. A job is typed `integration_qa` and persists the integration ID, exact integration commit SHA and server-owned QA profile ID as bounded metadata. The API returns HTTP 202 and a status URL; job status and QA assessment history are independently queryable. The worker re-resolves the operator-owned profile and Docker configuration, then the runtime repeats the checkout-path and exact-HEAD checks before execution. Captured evidence and the commit-bound QA assessment are persisted before the job reports completion. A static-only or non-executed assessment cannot produce a completed QA job. The queue uses the existing lease heartbeat and expired-lease recovery; execution is at-least-once, so a crash after QA persistence but before job completion can cause a reclaimed attempt to run the checks again and append another QA run. This is intentional and safer than claiming exactly-once semantics. The SQLite queue is still a single-instance development adapter; production multi-replica deployment needs shared durable storage and distributed worker coordination.
