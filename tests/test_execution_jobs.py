@@ -48,6 +48,69 @@ class ExecutionJobWorkflowTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_typed_qa_job_metadata_survives_claim_and_completion(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "qa-jobs.sqlite3")
+            store.enqueue_execution_job(
+                job_id="integration-qa-job", task_ids=("integration-abc",),
+                requested_by="owner", now=datetime.now(timezone.utc),
+                job_type="integration_qa",
+                metadata={
+                    "integration_id": "integration-abc",
+                    "profile_id": "python-unit",
+                    "commit_sha": "a" * 40,
+                },
+            )
+            seen = []
+            def execute(job):
+                seen.append((job["job_type"], job["metadata"]["commit_sha"]))
+                return [{
+                    "task_id": "integration-abc", "state": "completed",
+                    "qa": {
+                        "status": "passed", "commit_sha": "a" * 40,
+                        "executed_checks": 2, "evidence_refs": ["ev_test"],
+                    },
+                }]
+            service = ExecutionJobService(
+                store,
+                scheduler=type("Scheduler", (), {"dispatch_plan": lambda self, ids: None})(),
+                execution_handler=execute, worker_id="qa-runner",
+            )
+            try:
+                self.assertEqual(service.run_once(), "integration-qa-job")
+                job = store.get_execution_job("integration-qa-job")
+                self.assertEqual(job["state"], "completed")
+                self.assertEqual(job["job_type"], "integration_qa")
+                self.assertEqual(job["metadata"]["profile_id"], "python-unit")
+                self.assertEqual(seen, [("integration_qa", "a" * 40)])
+                self.assertEqual(job["outcomes"][0]["qa"]["evidence_refs"], ["ev_test"])
+            finally:
+                store.close()
+
+    def test_qa_job_with_not_assessed_result_is_not_completed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "qa-jobs.sqlite3")
+            store.enqueue_execution_job(
+                job_id="not-assessed-job", task_ids=("integration-abc",),
+                requested_by="owner", now=datetime.now(timezone.utc),
+                job_type="integration_qa", metadata={"integration_id": "integration-abc"},
+            )
+            service = ExecutionJobService(
+                store,
+                scheduler=type("Scheduler", (), {"dispatch_plan": lambda self, ids: None})(),
+                execution_handler=lambda job: [{
+                    "task_id": "integration-abc", "state": "completed",
+                    "qa": {"status": "not_assessed"},
+                }],
+                worker_id="qa-runner",
+            )
+            try:
+                service.run_once()
+                self.assertEqual(store.get_execution_job("not-assessed-job")["state"], "failed")
+            finally:
+                store.close()
+
     def test_job_runner_marks_qa_blocked_work_as_partial(self):
         with tempfile.TemporaryDirectory() as folder:
             store = SQLiteOrchestrationStore(Path(folder) / "jobs.sqlite3")
