@@ -180,6 +180,71 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 provider_configs_from_environment()
 
+    def test_registry_fails_over_to_independent_backup_provider(self):
+        class FakeProvider:
+            def __init__(self, result=None, error=None):
+                self.result = result
+                self.error = error
+                self.calls = 0
+            def complete(self, messages, **kwargs):
+                self.calls += 1
+                if self.error:
+                    raise self.error
+                return self.result
+
+        registry = ProviderRegistry(default_provider_id="cloud")
+        registry.register(ProviderConfig(
+            "cloud", "https://api.openai.com/v1", "primary",
+        ))
+        registry.register(ProviderConfig(
+            "gemini", "https://generativelanguage.googleapis.com/v1beta/openai",
+            "gemini-3.8-flash", api_key_env="GEMINI_API_KEY",
+        ))
+        primary = FakeProvider(error=ProviderError("Model provider returned HTTP 429."))
+        backup_response = __import__("bcs.providers", fromlist=["ProviderResponse"]).ProviderResponse(
+            "gemini", "gemini-3.8-flash", "Backup response",
+        )
+        backup = FakeProvider(result=backup_response)
+        registry._providers["cloud"] = primary
+        registry._providers["gemini"] = backup
+
+        result = registry.complete([{"role": "user", "content": "Build this."}])
+        self.assertEqual(result.provider_id, "gemini")
+        self.assertEqual(result.content, "Backup response")
+        self.assertEqual(primary.calls, 1)
+        self.assertEqual(backup.calls, 1)
+
+    def test_registry_reports_all_provider_failures_without_secrets(self):
+        registry = ProviderRegistry(default_provider_id="cloud")
+        registry.register(ProviderConfig("cloud", "https://api.example.com/v1", "primary"))
+        registry.register(ProviderConfig("backup", "https://backup.example.com/v1", "backup"))
+        class FailingProvider:
+            def complete(self, messages, **kwargs):
+                raise ProviderError("Model provider returned HTTP 429.")
+        registry._providers["cloud"] = FailingProvider()
+        registry._providers["backup"] = FailingProvider()
+        with self.assertRaises(ProviderError) as caught:
+            registry.complete([{"role": "user", "content": "Hi"}])
+        self.assertIn("cloud", str(caught.exception))
+        self.assertIn("backup", str(caught.exception))
+        self.assertNotIn("secret", str(caught.exception))
+
+    def test_environment_loads_configured_backup_providers(self):
+        backup = [{
+            "provider_id": "gemini",
+            "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+            "model": "gemini-3.8-flash",
+            "api_key_env": "GEMINI_API_KEY",
+        }]
+        with patch.dict(os.environ, {
+            "BCS_CLOUD_MODEL": "primary-model",
+            "BCS_CLOUD_BASE_URL": "https://api.openai.com/v1",
+            "BCS_BACKUP_PROVIDERS": json.dumps(backup),
+        }, clear=True):
+            configs = provider_configs_from_environment()
+        self.assertEqual([item.provider_id for item in configs], ["cloud", "gemini"])
+        self.assertEqual(configs[1].api_key_env, "GEMINI_API_KEY")
+
     def test_http_error_does_not_leak_provider_body(self):
         import urllib.error
         config = ProviderConfig("cloud", "https://api.example.com/v1", "model")
