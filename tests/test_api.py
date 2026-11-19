@@ -26,7 +26,7 @@ class BCSAPITests(unittest.TestCase):
         )
         self.worker = Principal(
             "worker-configured", ActorType.WORKER,
-            frozenset({"tasks:read", "approvals:read", "approvals:decide"}),
+            frozenset({"tasks:read", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote"}),
         )
         auth = TokenAuthenticator({
             hashlib.sha256(self.human_token.encode()).hexdigest(): self.human,
