@@ -82,7 +82,9 @@ class Orchestrator:
         now=datetime.now(timezone.utc); created=[]
         with self._lock:
             for item in handoff.repair_tasks:
-                if item.repair_task_id in self._tasks: continue
+                if item.repair_task_id in self._tasks:
+                    created.append(item.repair_task_id)
+                    continue
                 task=WorkerTask(item.repair_task_id,item.parent_task_id,item.assigned_role,
                     item.objective,item.acceptance_criteria,item.evidence_refs)
                 self._tasks[task.task_id]=TaskRecord(task,TaskState.QUEUED,
