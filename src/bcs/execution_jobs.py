@@ -33,10 +33,12 @@ class ExecutionJobService:
 
     def enqueue(self, task_ids, requested_by):
         job_id = "job_" + uuid4().hex
-        return self.store.enqueue_execution_job(
+        job = self.store.enqueue_execution_job(
             job_id=job_id, task_ids=tuple(task_ids), requested_by=requested_by,
             now=datetime.now(timezone.utc),
         )
+        self.start()
+        return job
 
     def start(self):
         if self._thread is not None and self._thread.is_alive():
