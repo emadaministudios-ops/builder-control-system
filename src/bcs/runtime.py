@@ -6,7 +6,7 @@ lifecycle. It does not start an HTTP server or connect model providers yet.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import timedelta
+from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 import os
 from pathlib import Path
@@ -19,7 +19,7 @@ from .sandbox_executor import DockerSandboxExecutor
 from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
-from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationRouter, ConsultationRoute)
+from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationRouter, ConsultationRoute, ConsultationRecord)
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
@@ -195,6 +195,13 @@ class BCSRuntime:
             worker_summary=worker_summary, blockers=blockers,
         )
         if not route.should_consult:
+            self.store.save_consultation(ConsultationRecord(
+                consultation_id="consult_" + uuid4().hex, task_id=task_id,
+                requesting_role=task.role, should_consult=False,
+                specialist_role=None, question="", reason=route.reason,
+                advice=None, risks=(), next_steps=(), confidence=None,
+                created_at=datetime.now(timezone.utc),
+            ))
             return route, None
         advice = self.consult_specialist(
             requesting_role=task.role, specialist_role=route.specialist_role,
@@ -207,7 +214,19 @@ class BCSRuntime:
             ),
             provider_id=provider_id,
         )
+        self.store.save_consultation(ConsultationRecord(
+            consultation_id="consult_" + uuid4().hex, task_id=task_id,
+            requesting_role=task.role, should_consult=True,
+            specialist_role=advice.specialist_role, question=advice.question,
+            reason=route.reason, advice=advice.advice, risks=advice.risks,
+            next_steps=advice.next_steps, confidence=advice.confidence,
+            created_at=datetime.now(timezone.utc),
+        ))
         return route, advice
+
+    def consultation_history(self, task_id: str | None = None):
+        """Return durable consultation decisions and specialist advice."""
+        return self.store.list_consultations(task_id)
 
     def apply_qa_review(self, review: QAReview):
         """Persist QA feedback and enqueue deterministic repair handoffs."""
