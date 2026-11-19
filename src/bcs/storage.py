@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 6
+_SCHEMA_VERSION = 7
 
 
 class StorageError(RuntimeError):
@@ -334,10 +334,10 @@ class SQLiteOrchestrationStore:
 
     def save_integration_run(self, record: dict) -> None:
         """Persist an immutable integration result; duplicate IDs are rejected."""
-        required = {"integration_id", "branch", "path", "status", "included_groups", "commits", "conflicts", "reason"}
+        required = {"integration_id", "branch", "path", "status", "included_groups", "commits", "conflicts", "reason", "commit_sha"}
         if not isinstance(record, dict) or set(record) != required:
             raise StorageError("Integration record has an invalid shape.")
-        if any(not isinstance(record[key], str) or not record[key] for key in ("integration_id", "branch", "path", "status")):
+        if any(not isinstance(record[key], str) or not record[key] for key in ("integration_id", "branch", "path", "status", "commit_sha")):
             raise StorageError("Integration identity and status fields are required.")
         for key in ("included_groups", "commits", "conflicts"):
             value = record[key]
