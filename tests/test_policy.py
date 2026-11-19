@@ -143,6 +143,16 @@ class PolicyTests(unittest.TestCase):
                 result = evaluate_tool_request(request, make_context(), now=NOW)
                 self.assertEqual(result.status, DecisionStatus.DENY)
 
+    def test_windows_drive_path_is_denied(self):
+        request = make_request("workspace.read", {"path": "C:/Windows/system.ini"})
+        result = evaluate_tool_request(request, make_context(), now=NOW)
+        self.assertEqual(result.status, DecisionStatus.DENY)
+
+    def test_non_json_arguments_are_denied_without_crashing(self):
+        request = make_request("workspace.read", {"path": "src/app.py", "bad": object()})
+        result = evaluate_tool_request(request, make_context(), now=NOW)
+        self.assertEqual(result.status, DecisionStatus.DENY)
+
     def test_request_identity_mismatch_is_denied(self):
         request = ToolRequest(
             request_id="request-1",
