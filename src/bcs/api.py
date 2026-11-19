@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
+import os
 from typing import Any
 from uuid import uuid4
 
@@ -85,6 +86,27 @@ class PlanCreateInput(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
 
 
+def _git_manager_from_environment():
+    """Build the trusted Git manager only from operator-controlled environment."""
+    repository_root = os.environ.get("BCS_GIT_REPOSITORY_ROOT")
+    worktree_root = os.environ.get("BCS_GIT_WORKTREE_ROOT")
+    if not repository_root and not worktree_root:
+        return None
+    if not repository_root or not worktree_root:
+        raise RuntimeError(
+            "Both BCS_GIT_REPOSITORY_ROOT and BCS_GIT_WORKTREE_ROOT must be configured."
+        )
+    from .git_worktrees import GitWorktreeError, GitWorktreeManager
+    try:
+        return GitWorktreeManager(
+            repository_root=repository_root,
+            worktree_root=worktree_root,
+            base_ref="development",
+        )
+    except (GitWorktreeError, OSError, ValueError) as exc:
+        raise RuntimeError("Trusted BCS Git integration could not be initialized.") from exc
+
+
 def create_app(
     *,
     runtime: BCSRuntime | None = None,
@@ -95,6 +117,7 @@ def create_app(
     owns_runtime = runtime is None
     active_runtime = runtime or create_runtime()
     active_authenticator = authenticator or TokenAuthenticator.from_environment()
+    active_git_manager = git_manager if git_manager is not None else _git_manager_from_environment()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -111,7 +134,7 @@ def create_app(
     app.state.bcs_runtime = active_runtime
     app.state.bcs_authenticator = active_authenticator
     # The Git manager is trusted server configuration; clients cannot supply paths or repositories.
-    app.state.bcs_git_manager = git_manager
+    app.state.bcs_git_manager = active_git_manager
 
     def require_principal(request: Request) -> Principal:
         try:
