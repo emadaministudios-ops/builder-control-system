@@ -60,4 +60,10 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(o.ingest_qa_report(report),o.ingest_qa_report(report))
         self.assertEqual(len(o.snapshot().tasks),1)
 
+    def test_windows_absolute_changed_path_is_rejected(self):
+        o=Orchestrator(); tid=o.ingest_qa_report(self.report())[0]
+        o.register_worker(worker_id="w1",role="frontend-developer",
+            handler=lambda _:WorkerResult(WorkerResultStatus.COMPLETED,"done",("C:\\\\outside.py",)))
+        self.assertEqual(o.dispatch(tid).state,TaskState.FAILED)
+
 if __name__=="__main__": unittest.main()
