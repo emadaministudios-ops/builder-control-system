@@ -67,7 +67,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             store = SQLiteOrchestrationStore(Path(folder) / "bcs.sqlite3")
             good = self.record()
-            bad = QAEscalation("", "parent", "run", "check", "bad", ())
+            bad = QAEscalation("bad-id", None, "run", "check", "bad", ())
             with self.assertRaises(sqlite3.IntegrityError):
                 store.save_state((good,), (bad,))
             self.assertEqual(store.list_tasks(), ())
