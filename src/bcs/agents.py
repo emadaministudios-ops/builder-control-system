@@ -24,7 +24,9 @@ The JSON schema is:
   "edits": [
     {"path": "workspace-relative/path", "content": "complete UTF-8 file content"}
   ],
-  "blockers": ["specific blocker, if any"]
+  "blockers": ["specific blocker, if any"],
+  "consultation_disposition": "followed | partially_followed | not_followed | unknown",
+  "consultation_reason": "brief explanation of how advice was used or why not"
 }
 Do not include any other keys. Never use absolute paths or parent-directory traversal.
 Only propose files directly relevant to the assigned objective and acceptance criteria.
@@ -104,8 +106,16 @@ class ModelWorker:
             data = json.loads(content)
         except (TypeError, json.JSONDecodeError) as exc:
             raise ValueError("Model response was not valid JSON.") from exc
-        if not isinstance(data, dict) or set(data) != {"summary", "edits", "blockers"}:
+        required = {"summary", "edits", "blockers"}
+        optional = {"consultation_disposition", "consultation_reason"}
+        if not isinstance(data, dict) or not required.issubset(data) or set(data) - required - optional:
             raise ValueError("Model response did not match the worker result schema.")
+        disposition = data.get("consultation_disposition", "unknown")
+        reason = data.get("consultation_reason", "")
+        if disposition not in {"followed", "partially_followed", "not_followed", "unknown"}:
+            raise ValueError("Consultation disposition is invalid.")
+        if not isinstance(reason, str) or len(reason) > 2000:
+            raise ValueError("Consultation reason must be at most 2000 characters.")
         if not isinstance(data["summary"], str) or not data["summary"].strip():
             raise ValueError("Model response summary is required.")
         if not isinstance(data["edits"], list) or len(data["edits"]) > self.max_edits:
@@ -137,6 +147,8 @@ class ModelWorker:
             "summary": data["summary"].strip(),
             "edits": tuple(normalized_edits),
             "blockers": tuple(item.strip() for item in data["blockers"]),
+            "consultation_disposition": disposition,
+            "consultation_reason": reason.strip(),
         }
 
     def __call__(self, task: WorkerTask) -> WorkerResult:
@@ -167,6 +179,8 @@ class ModelWorker:
                 WorkerResultStatus.BLOCKED,
                 proposal["summary"],
                 blockers=proposal["blockers"],
+                consultation_disposition=proposal["consultation_disposition"],
+                consultation_reason=proposal["consultation_reason"],
             )
         if not proposal["edits"]:
             return WorkerResult(
@@ -202,6 +216,8 @@ class ModelWorker:
                     "Model proposal was not fully applied; human approval or correction is required.",
                     changed_files=tuple(changed_files),
                     blockers=blockers,
+                    consultation_disposition=proposal["consultation_disposition"],
+                    consultation_reason=proposal["consultation_reason"],
                 )
             changed_files.append(path)
 
@@ -210,6 +226,8 @@ class ModelWorker:
             proposal["summary"],
             changed_files=tuple(changed_files),
             blockers=proposal["blockers"],
+            consultation_disposition=proposal["consultation_disposition"],
+            consultation_reason=proposal["consultation_reason"],
         )
 
 
