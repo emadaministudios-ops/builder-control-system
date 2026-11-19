@@ -212,6 +212,13 @@ class RuntimeCompositionTests(unittest.TestCase):
                 created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
             )
             runtime.store.save_consultation(consultation)
+            runtime.store.save_consultation(ConsultationRecord(
+                consultation_id="learning-skip", task_id="learning-root",
+                requesting_role="backend-developer", should_consult=False,
+                specialist_role=None, question="", reason="Routine implementation; no design gap.",
+                advice=None, risks=(), next_steps=(), confidence=None,
+                created_at=datetime(2026, 11, 19, 10, 30, tzinfo=timezone.utc),
+            ))
             runtime.record_consultation_outcome(
                 consultation_id="learning-consult", disposition="followed",
                 worker_reason="Implemented the singleton client.",
@@ -227,6 +234,8 @@ class RuntimeCompositionTests(unittest.TestCase):
             context = runtime.consultation_learning_context(child)
             self.assertIn("QA=failed", context)
             self.assertIn("Use a global singleton client.", context)
+            self.assertIn("Consultation=skipped", context)
+            self.assertIn("Routine implementation; no design gap.", context)
             isolated = replace(child, workspace_group_id="another-project")
             self.assertEqual(runtime.consultation_learning_context(isolated), "")
 
