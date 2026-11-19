@@ -17,6 +17,7 @@ class RuntimeWorkerIntegrationTests(unittest.TestCase):
     def test_task_dispatch_calls_model_worker_and_writes_to_isolated_workspace(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
+            (root / "src").mkdir()
             runtime = create_runtime(database_path=":memory:")
             try:
                 runtime.providers.complete = lambda messages, **kwargs: ProviderResponse(
