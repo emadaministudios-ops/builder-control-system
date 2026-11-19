@@ -18,7 +18,7 @@ class WorkspaceLeaseManager:
         self._guard = threading.Lock()
         self._leases: dict[Path, threading.Lock] = {}
 
-    def _lock_for(self, root: str | Path) -> threading.RLock:
+    def _lock_for(self, root: str | Path) -> threading.Lock:
         try:
             canonical = Path(root).expanduser().resolve(strict=True)
         except (OSError, RuntimeError) as exc:
