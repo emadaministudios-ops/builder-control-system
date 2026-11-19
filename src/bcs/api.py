@@ -9,6 +9,7 @@ from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -72,6 +73,12 @@ class ApprovalDecisionInput(BaseModel):
     reason: str = Field(default="", max_length=1000)
 
 
+class TaskCreateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(min_length=1, max_length=20_000)
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
+
+
 def create_app(
     *,
     runtime: BCSRuntime | None = None,
@@ -133,6 +140,33 @@ def create_app(
             "tasks": [_task_view(record) for record in snapshot.tasks],
             "escalations": [_json_value(asdict(item)) for item in snapshot.escalations],
         }
+
+    @app.post("/v1/tasks", status_code=status.HTTP_201_CREATED)
+    def create_task(
+        payload: TaskCreateInput,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "tasks:create")
+        if principal.actor_type.value != "human":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only an authenticated human principal may create top-level tasks.",
+            )
+        criteria = payload.acceptance_criteria or [
+            "Satisfy the original user objective without weakening its explicit constraints.",
+            "Provide QA evidence and report unresolved limitations honestly.",
+        ]
+        try:
+            record = active_runtime.orchestrator.create_task(
+                task_id="task_" + uuid4().hex,
+                objective=payload.objective,
+                acceptance_criteria=criteria,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+            ) from exc
+        return {"task": _task_view(record)}
 
     @app.get("/v1/approvals")
     def list_approvals(principal: Principal = Depends(require_principal)):
