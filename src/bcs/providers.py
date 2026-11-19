@@ -188,14 +188,31 @@ class ProviderRegistry:
 
     def complete(self, messages, *, provider_id: str | None = None,
                  temperature: float = 0.2, max_tokens: int = 1024) -> ProviderResponse:
+        """Try the selected provider first, then independent registered backups.
+
+        Only provider request failures trigger failover. Input validation and
+        application errors are not retried against another provider.
+        """
         selected = provider_id or self._default_provider_id
         if selected is None:
             raise ProviderError("No model provider has been configured.")
-        provider = self._providers.get(selected)
-        if provider is None:
+        if selected not in self._providers:
             raise ProviderError("Requested model provider is not registered.")
-        return provider.complete(
-            messages, temperature=temperature, max_tokens=max_tokens
+
+        order = [selected] + [
+            item for item in self._providers if item != selected
+        ]
+        failures = []
+        for candidate in order:
+            try:
+                return self._providers[candidate].complete(
+                    messages, temperature=temperature, max_tokens=max_tokens
+                )
+            except ProviderError as exc:
+                # ProviderError messages are deliberately sanitized by adapters.
+                failures.append(f"{candidate}: {str(exc)[:240]}")
+        raise ProviderError(
+            "All configured model providers failed. " + " | ".join(failures)
         )
 
 
@@ -225,6 +242,35 @@ def provider_configs_from_environment() -> tuple[ProviderConfig, ...]:
             model=cloud_model,
             api_key_env=os.environ.get("BCS_CLOUD_API_KEY_ENV", "OPENAI_API_KEY"),
         ))
+    # Optional independent providers are configured as a JSON array. Secrets
+    # remain in separately managed environment variables, never in this JSON.
+    backup_json = os.environ.get("BCS_BACKUP_PROVIDERS", "").strip()
+    if backup_json:
+        try:
+            backups = json.loads(backup_json)
+        except json.JSONDecodeError:
+            raise ValueError("BCS_BACKUP_PROVIDERS must be a valid JSON array.") from None
+        if not isinstance(backups, list):
+            raise ValueError("BCS_BACKUP_PROVIDERS must be a JSON array.")
+        for item in backups:
+            if not isinstance(item, dict):
+                raise ValueError("Each backup provider must be a JSON object.")
+            provider_id = item.get("provider_id")
+            base_url = item.get("base_url")
+            model = item.get("model")
+            api_key_env = item.get("api_key_env")
+            if not all(isinstance(value, str) and value.strip()
+                       for value in (provider_id, base_url, model, api_key_env)):
+                raise ValueError(
+                    "Each backup provider requires provider_id, base_url, model, and api_key_env."
+                )
+            configs.append(ProviderConfig(
+                provider_id=provider_id,
+                base_url=base_url,
+                model=model,
+                api_key_env=api_key_env,
+                timeout_seconds=float(item.get("timeout_seconds", 30.0)),
+            ))
     return tuple(configs)
 
 
