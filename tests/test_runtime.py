@@ -255,7 +255,7 @@ class RuntimeCompositionTests(unittest.TestCase):
                 disposition="followed",
                 worker_reason="Implemented adapter boundary.",
             )
-            report = runtime.report()
+            report = self.report()
             runtime._record_qa_consultation_assessments(report)
             history = runtime.consultation_outcome_history("runtime-parent")
             self.assertEqual(history[-1].qa_status, "failed")
