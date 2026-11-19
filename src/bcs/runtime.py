@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import timedelta
+from uuid import uuid4
 import os
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
 from .scheduler import TaskScheduler
+from .planner import TaskPlanner
 from .orchestrator import Orchestrator, WorkerTask
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
@@ -35,6 +37,34 @@ class BCSRuntime:
     providers: ProviderRegistry
     scheduler: TaskScheduler
     evidence_store: EvidenceStore
+    planner: TaskPlanner
+
+    def plan_and_create_tasks(
+        self,
+        objective: str,
+        acceptance_criteria: tuple[str, ...] | list[str] = (),
+        *,
+        provider_id: str | None = None,
+    ):
+        """Ask BRAIN for a dependency-aware plan and persist its specialist tasks."""
+        planner = self.planner if provider_id is None else TaskPlanner(
+            providers=self.providers, provider_id=provider_id
+        )
+        plan = planner.plan(objective, acceptance_criteria)
+        plan_id = "plan_" + uuid4().hex
+        task_ids = {step.step_id: f"{plan_id}_{step.step_id}" for step in plan.steps}
+        records = {}
+        by_step = {step.step_id: step for step in plan.steps}
+        for step_id in plan.execution_order:
+            step = by_step[step_id]
+            records[step_id] = self.orchestrator.create_task(
+                task_id=task_ids[step_id],
+                objective=step.objective,
+                acceptance_criteria=step.acceptance_criteria,
+                role=step.role,
+                dependency_ids=tuple(task_ids[item] for item in step.depends_on),
+            )
+        return plan, tuple(records[item] for item in plan.execution_order)
 
     def register_model_worker(
         self,
@@ -198,6 +228,7 @@ def create_runtime(
         feedback = FeedbackController(store=store)
         scheduler = TaskScheduler(orchestrator, max_concurrency=max_concurrency)
         evidence_store = EvidenceStore()
+        planner = TaskPlanner(providers=providers, provider_id=default_provider_id)
         return BCSRuntime(
             store=store,
             orchestrator=orchestrator,
@@ -206,6 +237,7 @@ def create_runtime(
             providers=providers,
             scheduler=scheduler,
             evidence_store=evidence_store,
+            planner=planner,
         )
     except Exception:
         store.close()
