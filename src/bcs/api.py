@@ -12,6 +12,7 @@ from enum import Enum
 import os
 import json
 import re
+import subprocess
 from typing import Any
 from uuid import uuid4
 
@@ -146,16 +147,70 @@ def _qa_profiles_from_environment() -> dict[str, tuple[dict[str, Any], ...]]:
     return profiles
 
 
+def _bootstrap_persistent_project_repository(repository_root: Path) -> None:
+    """Create an independent, persistent project repository on Railway's volume."""
+    repository_root.mkdir(parents=True, exist_ok=True)
+    git_dir = repository_root / ".git"
+    if git_dir.is_dir():
+        return
+    if any(repository_root.iterdir()):
+        raise RuntimeError(
+            "The configured project repository directory is not empty and is not a Git repository."
+        )
+    try:
+        subprocess.run(
+            ["git", "init", "--initial-branch=development", str(repository_root)],
+            check=True, capture_output=True, text=True, timeout=30, shell=False,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository_root), "config", "user.name", "BCS Project Builder"],
+            check=True, capture_output=True, text=True, timeout=15, shell=False,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository_root), "config", "user.email", "bcs-project-builder@localhost"],
+            check=True, capture_output=True, text=True, timeout=15, shell=False,
+        )
+        (repository_root / "README.md").write_text(
+            "# BCS Generated Projects\\n\\n"
+            "This is the isolated project workspace repository. Each generated project "
+            "is created in its own BCS-managed worktree and branch.\\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "-C", str(repository_root), "add", "README.md"],
+            check=True, capture_output=True, text=True, timeout=15, shell=False,
+        )
+        subprocess.run(
+            ["git", "-C", str(repository_root), "commit", "-m", "Initialize BCS project workspace"],
+            check=True, capture_output=True, text=True, timeout=30, shell=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        detail = getattr(exc, "stderr", None)
+        detail = detail.strip()[:300] if isinstance(detail, str) else type(exc).__name__
+        raise RuntimeError(f"Persistent project Git repository could not be initialized: {detail}") from exc
+
+
 def _git_manager_from_environment():
-    """Build the trusted Git manager only from operator-controlled environment."""
-    repository_root = os.environ.get("BCS_GIT_REPOSITORY_ROOT")
-    worktree_root = os.environ.get("BCS_GIT_WORKTREE_ROOT")
-    if not repository_root and not worktree_root:
-        return None
-    if not repository_root or not worktree_root:
+    """Build isolated project worktrees from explicit paths or Railway's persistent volume."""
+    configured_repository = os.environ.get("BCS_GIT_REPOSITORY_ROOT")
+    configured_worktrees = os.environ.get("BCS_GIT_WORKTREE_ROOT")
+    if bool(configured_repository) != bool(configured_worktrees):
         raise RuntimeError(
             "Both BCS_GIT_REPOSITORY_ROOT and BCS_GIT_WORKTREE_ROOT must be configured."
         )
+    if configured_repository:
+        repository_root = Path(configured_repository)
+        worktree_root = Path(configured_worktrees)
+    else:
+        volume_root = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "/data"))
+        if not volume_root.is_dir():
+            return None
+        project_root = volume_root / "projects"
+        repository_root = project_root / "repository"
+        worktree_root = project_root / "worktrees"
+        _bootstrap_persistent_project_repository(repository_root)
+        os.environ["BCS_GIT_REPOSITORY_ROOT"] = str(repository_root)
+        os.environ["BCS_GIT_WORKTREE_ROOT"] = str(worktree_root)
     from .git_worktrees import GitWorktreeError, GitWorktreeManager
     try:
         return GitWorktreeManager(
