@@ -26,6 +26,7 @@ from .auth import (
 )
 from .runtime import BCSRuntime, create_runtime
 from .execution_jobs import ExecutionJobService
+from .providers import ProviderError
 from .policy import OperatingMode
 
 
@@ -471,6 +472,11 @@ def create_app(
             job = active_job_service.enqueue(
                 [record.task.task_id for record in records], principal.actor_id
             )
+        except ProviderError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="BCS model provider is not ready. Configure the server-side provider credentials and retry.",
+            ) from exc
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
