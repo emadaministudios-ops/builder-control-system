@@ -113,9 +113,13 @@ def request_fingerprint(request: ToolRequest) -> str:
         "capability": request.capability,
         "arguments": request.arguments,
     }
-    canonical = json.dumps(
-        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    )
+    try:
+        canonical = json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Tool request arguments must be JSON-compatible.") from exc
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -127,6 +131,8 @@ def _valid_workspace_relative_path(value: Any) -> bool:
     if normalized.startswith("/") or normalized.startswith("~"):
         return False
     parts = normalized.split("/")
+    if len(parts[0]) >= 2 and parts[0][1] == ":":
+        return False
     return all(part not in ("", ".", "..") for part in parts)
 
 
@@ -158,11 +164,17 @@ def evaluate_tool_request(
     now: datetime | None = None,
 ) -> PolicyDecision:
     """Return an authorization decision; never invokes the requested capability."""
-    fingerprint = request_fingerprint(request)
-    current_time = now or datetime.now(timezone.utc)
-
-    def deny(reason: str) -> PolicyDecision:
+    def deny(reason: str, fingerprint: str = "") -> PolicyDecision:
         return PolicyDecision(DecisionStatus.DENY, reason, fingerprint)
+
+    try:
+        fingerprint = request_fingerprint(request)
+    except (TypeError, ValueError):
+        return deny("Tool request arguments must be JSON-compatible.")
+
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        return deny("Policy evaluation time must include a timezone.", fingerprint)
 
     if not request.request_id or not request.task_id or not request.worker_id:
         return deny("Request identity fields are required.")
