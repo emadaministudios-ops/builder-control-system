@@ -1,5 +1,6 @@
 """Unit tests for human approval lifecycle."""
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from bcs.approvals import (
     ApprovalService,
     ApprovalStatus,
 )
+from bcs.storage import SQLiteOrchestrationStore
 from bcs.policy import (
     DecisionStatus,
     OperatingMode,
@@ -144,6 +146,84 @@ class ApprovalServiceTests(unittest.TestCase):
     def test_naive_timestamp_is_rejected(self):
         with self.assertRaises(ApprovalError):
             self.service.submit(self.request, now=datetime(2026, 11, 19, 10, 0))
+
+
+class PersistentApprovalServiceTests(unittest.TestCase):
+    def test_pending_request_survives_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "approvals.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            first = ApprovalService(ttl=timedelta(minutes=10), store=store)
+            expected = first.submit(make_request(), now=NOW)
+            store.close()
+
+            reopened_store = SQLiteOrchestrationStore(path)
+            second = ApprovalService(ttl=timedelta(minutes=10), store=reopened_store)
+            restored = second.get("approval-1", now=NOW + timedelta(seconds=1))
+            self.assertEqual(restored, expected)
+            reopened_store.close()
+
+    def test_human_decision_survives_restart_and_remains_fingerprint_bound(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "approvals.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            first = ApprovalService(ttl=timedelta(minutes=10), store=store)
+            first.submit(make_request(), now=NOW)
+            approved = first.decide(
+                "approval-1", actor_id="authenticated-human",
+                actor_type=ActorType.HUMAN, approved=True,
+                reason="Reviewed", now=NOW + timedelta(seconds=2),
+            )
+            store.close()
+
+            reopened_store = SQLiteOrchestrationStore(path)
+            second = ApprovalService(ttl=timedelta(minutes=10), store=reopened_store)
+            self.assertEqual(second.get("approval-1", now=NOW + timedelta(seconds=3)), approved)
+            policy_approval = second.policy_approval(
+                "approval-1", now=NOW + timedelta(seconds=3)
+            )
+            self.assertIsNotNone(policy_approval)
+            self.assertEqual(
+                policy_approval.request_fingerprint, approved.request_fingerprint
+            )
+            with self.assertRaises(ApprovalError):
+                second.submit(make_request("src/changed.py"), now=NOW + timedelta(seconds=4))
+            reopened_store.close()
+
+    def test_expiration_is_persisted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "approvals.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            service = ApprovalService(ttl=timedelta(minutes=1), store=store)
+            service.submit(make_request(), now=NOW)
+            expired = service.get("approval-1", now=NOW + timedelta(minutes=1))
+            self.assertEqual(expired.status, ApprovalStatus.EXPIRED)
+            store.close()
+
+            reopened_store = SQLiteOrchestrationStore(path)
+            restored = ApprovalService(store=reopened_store).get(
+                "approval-1", now=NOW + timedelta(minutes=2)
+            )
+            self.assertEqual(restored.status, ApprovalStatus.EXPIRED)
+            reopened_store.close()
+
+    def test_old_schema_is_migrated_without_losing_tasks(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "legacy.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            store.close()
+            import sqlite3
+            connection = sqlite3.connect(path)
+            connection.execute("DROP TABLE approval_requests")
+            connection.execute("PRAGMA user_version = 1")
+            connection.commit()
+            connection.close()
+
+            migrated = SQLiteOrchestrationStore(path)
+            self.assertEqual(migrated.list_approvals(), ())
+            version = migrated._connection.execute("PRAGMA user_version").fetchone()[0]
+            self.assertEqual(version, 2)
+            migrated.close()
 
 
 if __name__ == "__main__":
