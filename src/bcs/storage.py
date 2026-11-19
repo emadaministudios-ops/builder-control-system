@@ -56,8 +56,8 @@ class SQLiteOrchestrationStore:
                     f"Database schema version {version} is newer than supported "
                     f"version {_SCHEMA_VERSION}."
                 )
-            if version == 0:
-                try:
+            try:
+                if version == 0:
                     with self._connection:
                         self._connection.execute("""
                             CREATE TABLE IF NOT EXISTS orchestration_tasks (
@@ -86,21 +86,21 @@ class SQLiteOrchestrationStore:
                         self._connection.execute(
                             f"PRAGMA user_version = {_SCHEMA_VERSION}"
                         )
-                    if version == 1:
-                        with self._connection:
-                            self._connection.execute("""
-                                CREATE TABLE IF NOT EXISTS approval_requests (
-                                    request_id TEXT PRIMARY KEY,
-                                    status TEXT NOT NULL,
-                                    expires_at TEXT NOT NULL,
-                                    payload TEXT NOT NULL CHECK (json_valid(payload))
-                                )
-                            """)
-                            self._connection.execute(
-                                f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                elif version == 1:
+                    with self._connection:
+                        self._connection.execute("""
+                            CREATE TABLE IF NOT EXISTS approval_requests (
+                                request_id TEXT PRIMARY KEY,
+                                status TEXT NOT NULL,
+                                expires_at TEXT NOT NULL,
+                                payload TEXT NOT NULL CHECK (json_valid(payload))
                             )
-                except sqlite3.Error as exc:
-                    raise StorageError("Could not initialize the BCS database.") from exc
+                        """)
+                        self._connection.execute(
+                            f"PRAGMA user_version = {_SCHEMA_VERSION}"
+                        )
+            except sqlite3.Error as exc:
+                raise StorageError("Could not initialize the BCS database.") from exc
 
     @staticmethod
     def _timestamp(value: datetime) -> str:
