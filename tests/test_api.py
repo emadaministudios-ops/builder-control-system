@@ -273,7 +273,7 @@ class BCSAPITests(unittest.TestCase):
                 json={"profile_id": "python-unit"},
             )
             self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json()["assessment"]["status"], "passed")
+            self.assertEqual(response.json()["assessment"]["status"], "not_assessed")
             check = run_qa.call_args.kwargs["checks"][0]
             self.assertEqual(check.argv, ("python", "-m", "unittest", "discover", "-s", "tests"))
             client.close()
