@@ -20,6 +20,7 @@ from .auth import (
     AuthenticationError, Principal, TokenAuthenticator,
 )
 from .runtime import BCSRuntime, create_runtime
+from .policy import OperatingMode
 
 
 def _json_value(value: Any) -> Any:
@@ -80,6 +81,11 @@ class TaskCreateInput(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
 
 
+class TaskDispatchInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    task_ids: list[str] = Field(min_length=1, max_length=100)
+
+
 class PlanCreateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     objective: str = Field(min_length=1, max_length=20_000)
@@ -107,6 +113,51 @@ def _git_manager_from_environment():
         raise RuntimeError("Trusted BCS Git integration could not be initialized.") from exc
 
 
+def _register_default_workers(runtime: BCSRuntime, git_manager) -> tuple[str, ...]:
+    """Register standard specialists against controller-owned isolated worktrees."""
+    if git_manager is None or not runtime.providers.provider_ids():
+        return ()
+    mode_name = os.environ.get("BCS_WORKER_MODE", "autonomous").strip().lower()
+    try:
+        mode = OperatingMode(mode_name)
+    except ValueError as exc:
+        raise RuntimeError("BCS_WORKER_MODE must be supervised or autonomous.") from exc
+    roles = (
+        "requirements-analyst", "architect", "frontend-developer",
+        "backend-developer", "integration-engineer", "qa-engineer",
+        "documentation-agent", "builder", "research-helper",
+    )
+    registered = []
+    for role in roles:
+        worker_id = "worker-" + role
+        runtime.register_model_worker(
+            worker_id=worker_id,
+            role=role,
+            workspace_factory=git_manager.workspace_for_task,
+            mode=mode,
+            capabilities=frozenset({"workspace.read", "workspace.edit"}),
+        )
+        registered.append(worker_id)
+    return tuple(registered)
+
+
+def _dispatch_view(outcome) -> dict[str, Any]:
+    result = outcome.result
+    return {
+        "task_id": outcome.task_id,
+        "state": outcome.state.value,
+        "worker_id": outcome.worker_id,
+        "reason": outcome.reason,
+        "result": None if result is None else {
+            "status": result.status.value,
+            "summary": result.summary,
+            "changed_files": list(result.changed_files),
+            "evidence_refs": list(result.evidence_refs),
+            "blockers": list(result.blockers),
+        },
+    }
+
+
 def create_app(
     *,
     runtime: BCSRuntime | None = None,
@@ -118,6 +169,7 @@ def create_app(
     active_runtime = runtime or create_runtime()
     active_authenticator = authenticator or TokenAuthenticator.from_environment()
     active_git_manager = git_manager if git_manager is not None else _git_manager_from_environment()
+    registered_workers = _register_default_workers(active_runtime, active_git_manager)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -135,6 +187,7 @@ def create_app(
     app.state.bcs_authenticator = active_authenticator
     # The Git manager is trusted server configuration; clients cannot supply paths or repositories.
     app.state.bcs_git_manager = active_git_manager
+    app.state.bcs_registered_workers = registered_workers
 
     def require_principal(request: Request) -> Principal:
         try:
@@ -241,6 +294,26 @@ def create_app(
                 ],
             },
             "tasks": [_task_view(record) for record in records],
+        }
+
+    @app.post("/v1/tasks/dispatch")
+    def dispatch_tasks(
+        payload: TaskDispatchInput,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "tasks:execute")
+        if principal.actor_type.value != "human":
+            raise HTTPException(status_code=403, detail="Only an authenticated human may start task execution.")
+        try:
+            result = active_runtime.scheduler.dispatch_plan(payload.task_ids)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="A submitted task does not exist.") from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {
+            "requested": result.requested,
+            "concurrency_limit": result.concurrency_limit,
+            "outcomes": [_dispatch_view(item) for item in result.outcomes],
         }
 
     @app.get("/v1/approvals")
