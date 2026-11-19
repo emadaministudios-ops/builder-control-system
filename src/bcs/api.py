@@ -7,6 +7,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime
+from pathlib import Path
 from enum import Enum
 import os
 import json
@@ -15,6 +16,8 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from .approvals import ApprovalError, ApprovalStatus
@@ -694,6 +697,18 @@ def create_app(
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"promotion": _json_value(record)}
+
+    dashboard_dir = Path(__file__).resolve().parents[2] / "dashboard"
+    if dashboard_dir.is_dir():
+        @app.get("/", include_in_schema=False)
+        def dashboard_home():
+            return RedirectResponse(url="/dashboard/")
+
+        app.mount(
+            "/dashboard",
+            StaticFiles(directory=str(dashboard_dir), html=True),
+            name="dashboard",
+        )
 
     return app
 
