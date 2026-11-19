@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 9
+_SCHEMA_VERSION = 10
 
 
 class StorageError(RuntimeError):
@@ -180,6 +180,19 @@ class SQLiteOrchestrationStore:
                             payload TEXT NOT NULL CHECK (json_valid(payload)),
                             FOREIGN KEY (integration_id)
                                 REFERENCES integration_runs(integration_id)
+                        )
+                    """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS execution_jobs (
+                            job_id TEXT PRIMARY KEY,
+                            requested_by TEXT NOT NULL,
+                            state TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            updated_at TEXT NOT NULL,
+                            lease_owner TEXT,
+                            lease_expires_at TEXT,
+                            attempt INTEGER NOT NULL DEFAULT 0,
+                            payload TEXT NOT NULL CHECK (json_valid(payload))
                         )
                     """)
                     self._connection.execute(
