@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 7
+_SCHEMA_VERSION = 8
 
 
 class StorageError(RuntimeError):
