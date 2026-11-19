@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from datetime import datetime
 import threading
 
 from .providers import ProviderError, ProviderRegistry
@@ -117,6 +118,51 @@ class SpecialistConsultant:
 
 
 @dataclass(frozen=True)
+class ConsultationRecord:
+    consultation_id: str
+    task_id: str
+    requesting_role: str
+    should_consult: bool
+    specialist_role: str | None
+    question: str
+    reason: str
+    advice: str | None
+    risks: tuple[str, ...]
+    next_steps: tuple[str, ...]
+    confidence: str | None
+    created_at: datetime
+
+    def __post_init__(self):
+        for label, value, maximum in (
+            ("consultation_id", self.consultation_id, 128),
+            ("task_id", self.task_id, 128),
+            ("requesting_role", self.requesting_role, 80),
+            ("reason", self.reason, 1000),
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+                raise ConsultationError(f"{label} is invalid.")
+        if not isinstance(self.should_consult, bool):
+            raise ConsultationError("Consultation decision must be boolean.")
+        if self.should_consult:
+            if self.specialist_role not in ALLOWED_SPECIALIST_ROLES or self.specialist_role == self.requesting_role:
+                raise ConsultationError("Consulted specialist role is invalid.")
+            if not isinstance(self.question, str) or not self.question.strip() or len(self.question) > 1500:
+                raise ConsultationError("Consultation question is invalid.")
+            if not isinstance(self.advice, str) or not self.advice.strip() or len(self.advice) > 6000:
+                raise ConsultationError("Consultation advice is invalid.")
+            if self.confidence not in {"low", "medium", "high"}:
+                raise ConsultationError("Consultation confidence is invalid.")
+        elif any((self.specialist_role is not None, self.question != "", self.advice is not None, self.confidence is not None, self.risks, self.next_steps)):
+            raise ConsultationError("A skipped consultation cannot contain specialist advice.")
+        if len(self.risks) > 10 or len(self.next_steps) > 10:
+            raise ConsultationError("Consultation lists exceed their limits.")
+        if any(not isinstance(item, str) or not item.strip() or len(item) > 1000 for item in self.risks + self.next_steps):
+            raise ConsultationError("Consultation list entries are invalid.")
+        if not isinstance(self.created_at, datetime) or self.created_at.tzinfo is None:
+            raise ConsultationError("Consultation timestamp must be timezone-aware.")
+
+
+@dataclass(frozen=True)
 class ConsultationRoute:
     should_consult: bool
     specialist_role: str | None
@@ -185,4 +231,4 @@ class ConsultationRouter:
         return ConsultationRoute(True, role, question.strip(), reason.strip())
 
 
-__all__ = ["ALLOWED_SPECIALIST_ROLES", "SpecialistAdvice", "ConsultationError", "SpecialistConsultant", "ConsultationRoute", "ConsultationRouter"]
+__all__ = ["ALLOWED_SPECIALIST_ROLES", "SpecialistAdvice", "ConsultationError", "ConsultationRecord", "SpecialistConsultant", "ConsultationRoute", "ConsultationRouter"]
