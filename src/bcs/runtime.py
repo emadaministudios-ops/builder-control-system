@@ -12,6 +12,8 @@ from pathlib import Path
 
 from .approvals import ApprovalService
 from .feedback import FeedbackController
+from .qa import EvidenceStore
+from .qa_supervisor import QAReview, build_qa_report
 from .agents import ModelWorker
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
@@ -32,6 +34,7 @@ class BCSRuntime:
     feedback: FeedbackController
     providers: ProviderRegistry
     scheduler: TaskScheduler
+    evidence_store: EvidenceStore
 
     def register_model_worker(
         self,
@@ -83,6 +86,13 @@ class BCSRuntime:
             worker_id=worker_id, role=role, handler=worker
         )
         return worker
+
+    def apply_qa_review(self, review: QAReview):
+        """Persist QA feedback and enqueue deterministic repair handoffs."""
+        report = build_qa_report(review, self.evidence_store)
+        feedback_snapshot = self.feedback.record_qa_report(report)
+        repair_task_ids = self.orchestrator.ingest_qa_report(report)
+        return report, feedback_snapshot, repair_task_ids
 
     def close(self) -> None:
         self.store.close()
@@ -143,6 +153,7 @@ def create_runtime(
         )
         feedback = FeedbackController(store=store)
         scheduler = TaskScheduler(orchestrator, max_concurrency=max_concurrency)
+        evidence_store = EvidenceStore()
         return BCSRuntime(
             store=store,
             orchestrator=orchestrator,
@@ -150,6 +161,7 @@ def create_runtime(
             feedback=feedback,
             providers=providers,
             scheduler=scheduler,
+            evidence_store=evidence_store,
         )
     except Exception:
         store.close()
