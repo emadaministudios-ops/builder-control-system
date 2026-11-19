@@ -64,6 +64,35 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
         self.assertEqual("awaiting_qa", result.status)
         self.assertTrue((result.path / "feature.py").exists())
 
+    def test_integration_history_survives_runtime_restart(self):
+        record = self.runtime.orchestrator.create_task(
+            task_id="durable-feature", objective="Build durable feature",
+            acceptance_criteria=["Feature works"], role="builder",
+        )
+        workspace = self.manager.workspace_for_group(record.task.workspace_group_id)
+        (workspace.root / "durable.py").write_text("ready = True\\n", encoding="utf-8")
+        self.runtime.orchestrator.register_worker(
+            worker_id="durable-builder", role="builder",
+            handler=lambda task: WorkerResult(
+                WorkerResultStatus.COMPLETED, "Finished",
+                changed_files=("durable.py",),
+            ),
+        )
+        self.runtime.orchestrator.dispatch(record.task.task_id)
+        result = self.runtime.integrate_completed_work(
+            manager=self.manager, integration_id="durable-integration",
+            workspace_group_ids=[record.task.workspace_group_id],
+        )
+        self.assertEqual("awaiting_qa", result.status)
+        self.runtime.close()
+        self.runtime = create_runtime(self.base / "bcs.sqlite3")
+        history = self.runtime.integration_history()
+        self.assertEqual(1, len(history))
+        self.assertEqual("durable-integration", history[0]["integration_id"])
+        self.assertEqual(result.branch, history[0]["branch"])
+        self.assertEqual(("durable.py",), history[0]["included_groups"] if False else history[0]["included_groups"])
+        self.assertEqual("awaiting_qa", history[0]["status"])
+
     def test_runtime_blocks_queued_or_failed_groups(self):
         record = self.runtime.orchestrator.create_task(
             task_id="not-ready", objective="Build pending feature",
