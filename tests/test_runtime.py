@@ -239,6 +239,62 @@ class RuntimeCompositionTests(unittest.TestCase):
             )
             self.assertEqual(runtime.consultation_cautions_for_task(unrelated), "")
 
+    def test_qa_report_automatically_assesses_consultation_outcome(self):
+        with create_runtime(":memory:") as runtime:
+            consultation = ConsultationRecord(
+                consultation_id="consult-auto-qa", task_id="runtime-parent",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="Which boundary?",
+                reason="Design boundary is unclear.", advice="Use an adapter.",
+                risks=(), next_steps=("Define interface.",), confidence="high",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            runtime.store.save_consultation(consultation)
+            runtime.record_consultation_outcome(
+                consultation_id="consult-auto-qa",
+                disposition="followed",
+                worker_reason="Implemented adapter boundary.",
+            )
+            report = runtime.report()
+            runtime._record_qa_consultation_assessments(report)
+            history = runtime.consultation_outcome_history("runtime-parent")
+            self.assertEqual(history[-1].qa_status, "failed")
+            self.assertEqual(history[-1].qa_run_id, "runtime-run")
+            self.assertTrue(history[-1].evidence_refs)
+
+    def test_static_only_positive_review_does_not_claim_test_pass(self):
+        from bcs.qa import QAReport, QACheck, QACheckStatus
+        with create_runtime(":memory:") as runtime:
+            consultation = ConsultationRecord(
+                consultation_id="consult-static-qa", task_id="static-parent",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="Which boundary?",
+                reason="Design boundary is unclear.", advice="Use an adapter.",
+                risks=(), next_steps=("Define interface.",), confidence="high",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            runtime.store.save_consultation(consultation)
+            runtime.record_consultation_outcome(
+                consultation_id="consult-static-qa", disposition="followed",
+                worker_reason="Implemented adapter boundary.",
+            )
+            now = datetime(2026, 11, 19, 12, 0, tzinfo=timezone.utc)
+            report = QAReport(
+                contract_version="1.0", task_id="static-parent", qa_run_id="static-run",
+                status=QACheckStatus.PASSED,
+                checks=(QACheck(
+                    check_id="review", name="Static review",
+                    status=QACheckStatus.PASSED, executed=False,
+                    details="No source gaps found.",
+                    non_execution_basis="Model-assisted review only.",
+                ),),
+                started_at=now, finished_at=now,
+            )
+            runtime._record_qa_consultation_assessments(report)
+            latest = runtime.consultation_outcome_history("static-parent")[-1]
+            self.assertEqual(latest.qa_status, "not_assessed")
+            self.assertIsNone(latest.qa_run_id)
+
     def test_invalid_approval_ttl_is_rejected(self):
         with self.assertRaises(ValueError):
             create_runtime(":memory:", approval_ttl_seconds=0)
