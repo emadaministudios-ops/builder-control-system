@@ -9,6 +9,8 @@ from dataclasses import asdict
 from datetime import datetime
 from enum import Enum
 import os
+import json
+import re
 from typing import Any
 from uuid import uuid4
 
@@ -91,6 +93,53 @@ class PlanCreateInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     objective: str = Field(min_length=1, max_length=20_000)
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
+
+
+
+class IntegrationQAInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_id: str = Field(min_length=1, max_length=80)
+
+
+def _qa_profiles_from_environment() -> dict[str, tuple[dict[str, Any], ...]]:
+    """Load immutable, operator-owned QA profiles; API clients choose names only."""
+    raw = os.environ.get("BCS_QA_PROFILES_JSON", "")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("BCS_QA_PROFILES_JSON must contain valid JSON.") from exc
+    if not isinstance(data, dict) or not 1 <= len(data) <= 50:
+        raise RuntimeError("BCS_QA_PROFILES_JSON must define 1 to 50 named profiles.")
+    allowed = {
+        item.strip() for item in os.environ.get("BCS_QA_ALLOWED_EXECUTABLES", "").split(",")
+        if item.strip()
+    }
+    if not allowed:
+        raise RuntimeError("BCS_QA_ALLOWED_EXECUTABLES must explicitly allow test executables.")
+    profiles = {}
+    for profile_id, checks in data.items():
+        if not isinstance(profile_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,79}", profile_id):
+            raise RuntimeError("QA profile IDs must be lowercase slugs.")
+        if not isinstance(checks, list) or not 1 <= len(checks) <= 20:
+            raise RuntimeError(f"QA profile {profile_id} must contain 1 to 20 checks.")
+        seen = set()
+        validated = []
+        for item in checks:
+            if not isinstance(item, dict) or set(item) != {"check_id", "name", "argv"}:
+                raise RuntimeError(f"QA profile {profile_id} contains an invalid check shape.")
+            check_id, name, argv = item["check_id"], item["name"], item["argv"]
+            if (not isinstance(check_id, str) or not re.fullmatch(r"[a-zA-Z0-9_-]{1,80}", check_id)
+                or check_id in seen or not isinstance(name, str) or not name.strip() or len(name) > 160
+                or not isinstance(argv, list) or not 1 <= len(argv) <= 32
+                or any(not isinstance(part, str) or not part or len(part) > 512 or "\\x00" in part for part in argv)
+                or argv[0] not in allowed):
+                raise RuntimeError(f"QA profile {profile_id} contains an invalid or non-allowlisted command.")
+            seen.add(check_id)
+            validated.append({"check_id": check_id, "name": name, "argv": tuple(argv)})
+        profiles[profile_id] = tuple(validated)
+    return profiles
 
 
 def _git_manager_from_environment():
