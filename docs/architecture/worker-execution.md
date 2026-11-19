@@ -111,3 +111,9 @@ BCS does not silently fall back to another provider. Local inference avoids per-
 ## Verification boundary
 
 CI uses mocked model responses and temporary workspaces. It verifies contracts, policy enforcement, routing, feedback state and concurrency ceilings. It does not prove that a particular real model can solve complex projects, that Docker is installed and running, or that a cloud deployment is secure and available.
+
+## Specialist-to-specialist consultation
+
+The runtime exposes `consult_specialist(...)` for a bounded advisory exchange between two allowlisted specialist roles. BRAIN or another trusted controller decides when to request consultation and selects the target role; this first implementation does not let model-generated text autonomously select arbitrary agents.
+
+The consultant receives only the controller-supplied objective, question and bounded context. Its strict response contract contains advice, risks, next steps and a confidence label. The consultant has no workspace gateway, shell/test execution, secret access, task mutation, approval, or release capability. Advice is untrusted input: the requesting worker/controller must evaluate it against the original task and QA requirements before acting. The exchange is currently synchronous and not persisted as a separate audit record; durable consultation history and automatic escalation routing remain future work.
