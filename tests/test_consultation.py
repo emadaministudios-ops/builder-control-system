@@ -59,6 +59,23 @@ class SpecialistConsultationTests(unittest.TestCase):
         self.assertTrue(route.should_consult)
         self.assertEqual(route.specialist_role, "architect")
 
+    def test_brain_receives_bounded_prior_collaboration_outcomes(self):
+        providers = FakeProviders(
+            '{"should_consult":false,"specialist_role":null,'
+            '"question":"","reason":"The prior failed approach is not useful here."}'
+        )
+        route = ConsultationRouter(providers=providers).route(
+            task_role="backend-developer", objective="Repair API integration",
+            acceptance_criteria=("API integration works.",),
+            worker_summary="A repair is needed.",
+            collaboration_history="Specialist=architect; adoption=followed; QA=failed; advice=Use a shared global client.",
+        )
+        self.assertFalse(route.should_consult)
+        payload = json.loads(providers.calls[0][0][1]["content"])
+        self.assertIn("QA=failed", payload["prior_collaboration_outcomes"])
+        self.assertIn("Use a shared global client", payload["prior_collaboration_outcomes"])
+        self.assertIn("avoid repeating advice", providers.calls[0][0][0]["content"])
+
     def test_brain_can_skip_unnecessary_consultation(self):
         providers = FakeProviders(
             '{"should_consult":false,"specialist_role":null,'
