@@ -579,10 +579,10 @@ def create_app(
             raise HTTPException(status_code=404, detail="Integration not found.") from exc
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        return {
-            "assessment": _json_value(asdict(report)),
-            "integration_qa": _json_value(active_runtime.integration_qa_history(integration_id)[-1]),
-        }
+        history = active_runtime.integration_qa_history(integration_id)
+        if not history:
+            raise HTTPException(status_code=500, detail="QA completed without a persisted assessment.")
+        return {"assessment": _json_value(history[-1])}
 
     @app.get("/v1/integrations/{integration_id}/qa")
     def list_integration_qa(
