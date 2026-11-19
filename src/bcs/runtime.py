@@ -120,12 +120,42 @@ class BCSRuntime:
             )
             return WorkspaceToolGateway(workspace, context, self.approvals)
 
+        consultation_cache: dict[str, str] = {}
+
+        def consultation_provider(task: WorkerTask) -> str:
+            if task.task_id not in consultation_cache:
+                try:
+                    route, advice = self.consult_for_task(
+                        task.task_id,
+                        worker_summary=(
+                            "Pre-execution assessment: identify a concrete knowledge gap, "
+                            "blocker, or material design risk before implementation."
+                        ),
+                        provider_id=provider_id,
+                    )
+                    if route.should_consult and advice is not None:
+                        consultation_cache[task.task_id] = (
+                            "Consulted role: " + advice.specialist_role
+                            + "\\nQuestion: " + advice.question
+                            + "\\nAdvice: " + advice.advice
+                            + "\\nRisks: " + "; ".join(advice.risks)
+                            + "\\nSuggested next steps: " + "; ".join(advice.next_steps)
+                            + "\\nConfidence: " + advice.confidence
+                        )
+                    else:
+                        consultation_cache[task.task_id] = ""
+                except Exception:
+                    # Advice is optional; failure never grants extra authority.
+                    consultation_cache[task.task_id] = ""
+            return consultation_cache[task.task_id]
+
         worker = ModelWorker(
             worker_id=worker_id,
             role=role,
             providers=self.providers,
             gateway_factory=gateway_factory,
             provider_id=provider_id,
+            consultation_provider=consultation_provider,
         )
         self.orchestrator.register_worker(
             worker_id=worker_id, role=role, handler=worker
