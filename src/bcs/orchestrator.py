@@ -205,7 +205,7 @@ class Orchestrator:
             for path in result.changed_files:
                 if not isinstance(path, str):
                     raise ValueError("Worker changed-file paths must be strings")
-                normalized = path.replace("\\\\", "/")
+                normalized = path.replace("\\", "/")
                 if (
                     not path.strip() or normalized.startswith("/")
                     or any(part in ("..", "") for part in normalized.split("/"))
