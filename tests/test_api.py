@@ -22,7 +22,7 @@ class BCSAPITests(unittest.TestCase):
         self.worker_token = "worker-test-secret"
         self.human = Principal(
             "owner-configured", ActorType.HUMAN,
-            frozenset({"tasks:read", "approvals:read", "approvals:decide"}),
+            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide"}),
         )
         self.worker = Principal(
             "worker-configured", ActorType.WORKER,
@@ -42,6 +42,27 @@ class BCSAPITests(unittest.TestCase):
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+    def test_human_can_create_task_but_worker_cannot(self):
+        created = self.client.post(
+            "/v1/tasks",
+            headers={"Authorization": f"Bearer {self.human_token}"},
+            json={
+                "objective": "Build the requested app and preserve its behavior.",
+                "acceptance_criteria": ["Registration works", "QA verifies the flow"],
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        task = created.json()["task"]
+        self.assertEqual(task["state"], "queued")
+        self.assertIn("preserve its behavior", task["task"]["objective"])
+
+        denied = self.client.post(
+            "/v1/tasks",
+            headers={"Authorization": f"Bearer {self.worker_token}"},
+            json={"objective": "Worker attempts to create an owner task."},
+        )
+        self.assertEqual(denied.status_code, 403)
 
     def test_protected_endpoint_requires_bearer_token(self):
         response = self.client.get("/v1/tasks")
