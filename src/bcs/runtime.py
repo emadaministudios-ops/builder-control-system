@@ -207,6 +207,51 @@ class BCSRuntime:
             context=context,
         )
 
+    def consultation_learning_context(self, task: WorkerTask, *, limit: int = 5) -> str:
+        """Build bounded, project-scoped prior consultation evidence for BRAIN."""
+        if not isinstance(task, WorkerTask):
+            raise TypeError("A validated WorkerTask is required.")
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 8:
+            raise ValueError("Consultation history limit must be between 1 and 8.")
+        task_ids = [task.task_id]
+        group_id = task.workspace_group_id
+        parent_id = task.parent_task_id if group_id else None
+        visited = {task.task_id}
+        while parent_id and parent_id not in visited and len(task_ids) < 12:
+            visited.add(parent_id)
+            parent = self.orchestrator.get_task(parent_id)
+            if parent is None or parent.task.workspace_group_id != group_id:
+                break
+            task_ids.append(parent_id)
+            parent_id = parent.task.parent_task_id
+        consultations = []
+        outcomes = []
+        for item_id in task_ids:
+            consultations.extend(self.store.list_consultations(item_id))
+            outcomes.extend(self.store.list_consultation_outcomes(item_id))
+        by_id = {item.consultation_id: item for item in consultations}
+        latest = {}
+        for outcome in outcomes:
+            previous = latest.get(outcome.consultation_id)
+            if previous is None or outcome.created_at > previous.created_at:
+                latest[outcome.consultation_id] = outcome
+        rows = []
+        for consultation_id, outcome in latest.items():
+            consultation = by_id.get(consultation_id)
+            if consultation is None or not consultation.should_consult:
+                continue
+            rows.append(
+                (outcome.created_at,
+                 "Specialist=" + str(consultation.specialist_role)
+                 + "; adoption=" + outcome.disposition
+                 + "; QA=" + outcome.qa_status
+                 + "; reason=" + outcome.worker_reason[:500]
+                 + "; advice=" + (consultation.advice or "")[:700]
+                 + "; evidence=" + ";".join(outcome.evidence_refs[:5]))
+            )
+        rows.sort(key=lambda item: item[0], reverse=True)
+        return "\\n".join(item[1] for item in rows[:limit])[:4000]
+
     def consult_for_task(
         self, task_id: str, *, worker_summary: str,
         blockers: tuple[str, ...] = (), provider_id: str | None = None,
@@ -217,10 +262,12 @@ class BCSRuntime:
             raise KeyError("Task does not exist.")
         task = record.task
         router = ConsultationRouter(providers=self.providers, provider_id=provider_id)
+        history_context = self.consultation_learning_context(task)
         route = router.route(
             task_role=task.role, objective=task.objective,
             acceptance_criteria=task.acceptance_criteria,
             worker_summary=worker_summary, blockers=blockers,
+            collaboration_history=history_context,
         )
         if not route.should_consult:
             self.store.save_consultation(ConsultationRecord(
