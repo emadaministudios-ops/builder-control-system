@@ -36,7 +36,7 @@ class ExecutionJobWorkflowTests(unittest.TestCase):
                     },
                 }]
             service = ExecutionJobService(
-                store, scheduler=object(), execution_handler=workflow,
+                store, scheduler=type("Scheduler", (), {"dispatch_plan": lambda self, task_ids: None})(), execution_handler=workflow,
                 worker_id="workflow-runner",
             )
             try:
@@ -56,7 +56,7 @@ class ExecutionJobWorkflowTests(unittest.TestCase):
                 requested_by="owner", now=datetime.now(timezone.utc),
             )
             service = ExecutionJobService(
-                store, scheduler=object(),
+                store, scheduler=type("Scheduler", (), {"dispatch_plan": lambda self, task_ids: None})(),
                 execution_handler=lambda job: [{
                     "task_id": "task-one", "state": "completed",
                     "qa": {"status": "blocked"},
