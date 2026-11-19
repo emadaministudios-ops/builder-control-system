@@ -142,7 +142,7 @@ class BCSAPITests(unittest.TestCase):
             root = Path(folder)
             self.runtime.providers.complete = lambda messages, **kwargs: ProviderResponse(
                 "test", "test-model",
-                '{"summary":"Created module","edits":[{"path":"module.py","content":"VALUE = 7\n"}],"blockers":[]}',
+                '{"summary":"Created module","edits":[{"path":"module.py","content":"VALUE = 7\\n"}],"blockers":[]}',
             )
             self.runtime.register_model_worker(
                 worker_id="builder-api-test",
