@@ -335,6 +335,30 @@ class BCSAPITests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 _qa_profiles_from_environment()
 
+    def test_git_manager_bootstraps_separate_persistent_project_repository(self):
+        with tempfile.TemporaryDirectory() as folder:
+            volume = Path(folder)
+            with patch.dict(
+                "os.environ",
+                {"RAILWAY_VOLUME_MOUNT_PATH": str(volume)},
+                clear=True,
+            ):
+                manager = _git_manager_from_environment()
+                self.assertEqual(manager.repository_root, volume / "projects" / "repository")
+                self.assertEqual(manager.worktree_root, volume / "projects" / "worktrees")
+                self.assertEqual(
+                    manager._run(["symbolic-ref", "--short", "HEAD"]).stdout.strip(),
+                    "development",
+                )
+                first = manager.workspace_for_group("test-project")
+                self.assertTrue(first.root.is_dir())
+                self.assertNotEqual(first.root, manager.repository_root)
+                self.assertTrue((first.root / "README.md").is_file())
+                self.assertEqual(
+                    _git_manager_from_environment().repository_root,
+                    manager.repository_root,
+                )
+
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
             "os.environ",
@@ -343,8 +367,6 @@ class BCSAPITests(unittest.TestCase):
         ):
             with self.assertRaises(RuntimeError):
                 _git_manager_from_environment()
-        with patch.dict("os.environ", {}, clear=True):
-            self.assertIsNone(_git_manager_from_environment())
 
     def test_decision_body_rejects_unrecognized_fields(self):
         response = self.client.post(
