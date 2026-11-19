@@ -1,9 +1,9 @@
 """Human approval lifecycle for exact, fingerprinted tool requests.
 
-This in-memory implementation is suitable for the first integration tests only.
-Production deployment must replace the store with a transactional database and
-derive actor identity/type from authenticated server-side identity, never request
-payload fields supplied by a worker.
+ApprovalService can use an injected durable repository. The SQLite adapter is
+the current local/development implementation; production should use PostgreSQL.
+Actor identity/type must come from authenticated server-side identity, never
+request payload fields supplied by a worker.
 """
 from __future__ import annotations
 
