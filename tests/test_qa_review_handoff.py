@@ -15,6 +15,10 @@ from bcs.qa import EvidenceStore
 from bcs.orchestrator import WorkerResult, WorkerResultStatus, WorkerTask, TaskState
 from bcs.providers import ProviderResponse
 from bcs.workspace import Workspace
+from bcs.qa_runner import QACheckSpec
+from bcs.sandbox_executor import ExecutionResult
+from bcs.policy import OperatingMode
+from unittest.mock import patch
 
 
 class QAReviewHandoffTests(unittest.TestCase):
@@ -233,6 +237,82 @@ class QAReviewHandoffTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             build_qa_report(review, EvidenceStore())
+
+
+    def test_execute_with_qa_runs_tests_repairs_failure_and_retests(self):
+        class SequenceSupervisor:
+            def review(self, task, result):
+                return QAReview(
+                    task_id=task.task_id,
+                    status=ReviewStatus.READY_FOR_TESTS,
+                    requirements=(("R1", "Unit tests pass."),),
+                    findings=(), summary="No source-level gap identified.",
+                    recommended_specialist=None,
+                )
+
+        class FakeExecutor:
+            calls = 0
+            def __init__(self, **kwargs):
+                pass
+            def execute(self, request_id, argv, now=None):
+                self.__class__.calls += 1
+                if self.__class__.calls == 1:
+                    return ExecutionResult(
+                        "failed", "Container command returned a non-zero exit code.",
+                        exit_code=1, stdout="1 failed",
+                    )
+                return ExecutionResult(
+                    "completed", "Container command completed successfully.",
+                    exit_code=0, stdout="3 passed",
+                )
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            runtime = create_runtime(database_path=":memory:")
+            try:
+                runtime.orchestrator.create_task(
+                    task_id="tested-parent", objective="Build feature and pass tests.",
+                    acceptance_criteria=["Unit tests pass."], role="builder",
+                )
+                def worker(task):
+                    if task.parent_task_id:
+                        return WorkerResult(
+                            WorkerResultStatus.COMPLETED, "Repaired failing tests.",
+                            changed_files=("src/feature.py",),
+                        )
+                    return WorkerResult(
+                        WorkerResultStatus.COMPLETED, "Initial implementation.",
+                        changed_files=("src/feature.py",),
+                    )
+                runtime.orchestrator.register_worker(
+                    worker_id="builder", role="builder", handler=worker,
+                )
+                with patch("bcs.runtime.DockerSandboxExecutor", FakeExecutor):
+                    outcome = runtime.execute_with_qa(
+                        "tested-parent", SequenceSupervisor(), max_repair_rounds=2,
+                        executable_checks=(QACheckSpec(
+                            "unit", "Unit test suite", "unit-run",
+                            ("python", "-m", "unittest"),
+                        ),),
+                        qa_workspace_factory=lambda task: Workspace(
+                            "workspace-" + task.workspace_group_id, root,
+                        ),
+                        docker_executable="docker",
+                        qa_image="python:3.12-slim",
+                        allowed_qa_images=frozenset({"python:3.12-slim"}),
+                        qa_mode=OperatingMode.AUTONOMOUS,
+                    )
+                self.assertEqual(FakeExecutor.calls, 2)
+                self.assertEqual(outcome.state, FeedbackState.VERIFIED)
+                self.assertEqual(len(outcome.repair_task_ids), 1)
+                self.assertTrue(any(
+                    check.executed and check.status.value == "failed"
+                    for review in outcome.reviews
+                    for check in runtime.evidence_store._items.values()
+                ) is False)
+                self.assertIn("Controller-defined sandbox tests were executed", outcome.reason)
+            finally:
+                runtime.close()
 
 
 if __name__ == "__main__":
