@@ -16,7 +16,7 @@ class WorkspaceLeaseManager:
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
-        self._leases: dict[Path, threading.RLock] = {}
+        self._leases: dict[Path, threading.Lock] = {}
 
     def _lock_for(self, root: str | Path) -> threading.RLock:
         try:
