@@ -17,6 +17,7 @@ from bcs.qa_runner import QACheckSpec
 from bcs.workspace import Workspace
 from bcs.policy import OperatingMode
 from bcs.runtime import create_runtime
+from bcs.consultation import ConsultationRecord
 from bcs.providers import ProviderConfig, ProviderError
 
 
@@ -168,6 +169,31 @@ class RuntimeCompositionTests(unittest.TestCase):
                 self.assertIsNotNone(runtime.evidence_store.get(report.checks[0].evidence_ref))
                 self.assertEqual(captured["context"].task_id, "exec-qa")
                 self.assertIn("tests.run", captured["context"].task_capabilities)
+
+    def test_runtime_records_worker_disposition_separately_from_qa_result(self):
+        with create_runtime(":memory:") as runtime:
+            consultation = ConsultationRecord(
+                consultation_id="consult-runtime", task_id="task-runtime-feedback",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="Where should this live?",
+                reason="Boundary is unclear.", advice="Use an adapter.",
+                risks=(), next_steps=("Define interface.",), confidence="high",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            runtime.store.save_consultation(consultation)
+            outcome = runtime.record_consultation_outcome(
+                consultation_id="consult-runtime", disposition="followed",
+                worker_reason="Implemented the adapter boundary.",
+                qa_status="passed", qa_run_id="qa-runtime-1",
+                evidence_refs=("evidence:unit-tests",),
+            )
+            self.assertEqual(outcome.disposition, "followed")
+            self.assertEqual(outcome.qa_status, "passed")
+            self.assertEqual(runtime.consultation_outcome_history("task-runtime-feedback"), (outcome,))
+            with self.assertRaises(KeyError):
+                runtime.record_consultation_outcome(
+                    consultation_id="missing-consultation", disposition="unknown"
+                )
 
     def test_invalid_approval_ttl_is_rejected(self):
         with self.assertRaises(ValueError):
