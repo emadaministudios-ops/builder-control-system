@@ -4,10 +4,14 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bcs.git_worktrees import GitWorktreeManager
+from bcs.qa import EvidenceStore, QAReportBuilder
+from bcs.qa_runner import QACheckSpec
+from bcs.sandbox_executor import ExecutionResult
 from bcs.orchestrator import WorkerResult, WorkerResultStatus
 from bcs.runtime import create_runtime
 
@@ -96,6 +100,81 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
         self.assertEqual("awaiting_qa", history[0]["status"])
         self.assertEqual(result.commit_sha, history[0]["commit_sha"])
 
+    def _completed_integration(self, task_id, integration_id):
+        record = self.runtime.orchestrator.create_task(
+            task_id=task_id, objective="Build integration QA fixture",
+            acceptance_criteria=["Fixture works"], role="builder",
+        )
+        workspace = self.manager.workspace_for_group(record.task.workspace_group_id)
+        (workspace.root / "fixture.py").write_text("ready = True\\n", encoding="utf-8")
+        self.runtime.orchestrator.register_worker(
+            worker_id=task_id + "-worker", role="builder",
+            handler=lambda task: WorkerResult(
+                WorkerResultStatus.COMPLETED, "Fixture complete",
+                changed_files=("fixture.py",),
+            ),
+        )
+        self.runtime.orchestrator.dispatch(task_id)
+        result = self.runtime.integrate_completed_work(
+            manager=self.manager, integration_id=integration_id,
+            workspace_group_ids=[record.task.workspace_group_id],
+        )
+        return record, result
+
+    def test_integration_qa_executes_in_exact_checkout_and_persists(self):
+        record, integration = self._completed_integration("qa-task", "qa-integration")
+        executor = Mock()
+        executor.execute.return_value = ExecutionResult(
+            "completed", "Tests passed", exit_code=0, stdout="ok"
+        )
+        with patch("bcs.runtime.DockerSandboxExecutor", return_value=executor):
+            report = self.runtime.run_integration_qa(
+                manager=self.manager, integration_id=integration.integration_id,
+                checks=(QACheckSpec("unit", "Unit tests", "qa-request", ("python", "-m", "unittest")),),
+                docker_executable="docker", image="bcs-test:latest",
+                allowed_images=frozenset({"bcs-test:latest"}),
+            )
+        self.assertEqual(record.task.task_id, report.task_id)
+        history = self.runtime.integration_qa_history(integration.integration_id)
+        self.assertEqual(1, len(history))
+        self.assertEqual(integration.commit_sha, history[0]["commit_sha"])
+        self.assertEqual("passed", history[0]["status"])
+        self.assertEqual(1, history[0]["executed_check_count"])
+        self.assertTrue(history[0]["evidence_refs"])
+        self.runtime.close()
+        self.runtime = create_runtime(self.base / "bcs.sqlite3")
+        self.assertEqual(history, self.runtime.integration_qa_history(integration.integration_id))
+
+    def test_static_only_pass_is_not_assessed_as_executed_qa(self):
+        record, integration = self._completed_integration("static-task", "static-integration")
+        builder = QAReportBuilder(
+            task_id=record.task.task_id, qa_run_id="static-only-run",
+            evidence_store=EvidenceStore(),
+        )
+        builder.add_static_check(
+            check_id="source-review", name="Source review", passed=True,
+            details="No source issue found.", basis="Static inspection only.",
+        )
+        report = builder.build()
+        with self.assertRaises(ValueError):
+            self.runtime._attach_qa_report_to_integration(integration.integration_id, report)
+
+    def test_integration_qa_refuses_changed_checkout_head(self):
+        _, integration = self._completed_integration("changed-task", "changed-integration")
+        git(integration.path, "checkout", "--detach", "HEAD")
+        git(integration.path, "commit", "--allow-empty", "-m", "move HEAD")
+        executor = Mock()
+        executor.execute.return_value = ExecutionResult(
+            "completed", "Tests passed", exit_code=0, stdout="ok"
+        )
+        with patch("bcs.runtime.DockerSandboxExecutor", return_value=executor):
+            with self.assertRaisesRegex(ValueError, "HEAD no longer matches"):
+                self.runtime.run_integration_qa(
+                    manager=self.manager, integration_id=integration.integration_id,
+                    checks=(QACheckSpec("unit", "Unit", "changed-request", ("pytest",)),),
+                    docker_executable="docker", image="bcs-test:latest",
+                    allowed_images=frozenset({"bcs-test:latest"}),
+                )
     def test_runtime_blocks_queued_or_failed_groups(self):
         record = self.runtime.orchestrator.create_task(
             task_id="not-ready", objective="Build pending feature",
