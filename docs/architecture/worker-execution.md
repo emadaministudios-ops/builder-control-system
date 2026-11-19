@@ -141,3 +141,10 @@ This is an auditable feedback foundation, not model training or a claim that BCS
 
 
 Repair workers receive up to three recent failed consultation approaches from their own task's ancestor chain, but only when the ancestor tasks share the exact same non-empty `workspace_group_id`. A caution is included only when the latest recorded outcome says the worker followed or partly followed the advice and a trusted QA assessment recorded failure. The prompt labels this material untrusted cautionary evidence and asks the repair worker not to repeat an approach without explaining what materially changes. Unrelated projects, skipped consultations, unadopted advice and advice without a failed QA assessment are excluded. This history is bounded to three entries and 4,000 characters.
+
+
+## Automatic worker-to-QA consultation feedback
+
+Model workers may return a bounded `consultation_disposition` (`followed`, `partially_followed`, `not_followed`, or `unknown`) and a short explanation. These are self-reported fields in the validated worker result; the controller records them only when that task actually received specialist advice. The worker cannot assign QA status or evidence.
+
+When QA reports are applied, the runtime appends a separate assessment to the same consultation outcome history. Failed, blocked and error reports retain their corresponding status. A passed report is recorded as `passed` only when it includes executed checks; static-only source review remains `not_assessed` rather than being mistaken for successful tests. QA run IDs and execution evidence references are attached by the controller. Repeated attachment of the same QA run/status is idempotent. Worker results persist their disposition fields with backward-compatible defaults for older records.
