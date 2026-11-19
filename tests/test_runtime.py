@@ -18,6 +18,7 @@ from bcs.workspace import Workspace
 from bcs.policy import OperatingMode
 from bcs.runtime import create_runtime
 from bcs.consultation import ConsultationRecord
+from bcs.consultation_feedback import ConsultationOutcome
 from bcs.providers import ProviderConfig, ProviderError
 
 
@@ -194,6 +195,49 @@ class RuntimeCompositionTests(unittest.TestCase):
                 runtime.record_consultation_outcome(
                     consultation_id="missing-consultation", disposition="unknown"
                 )
+
+    def test_repair_worker_receives_only_failed_advice_from_same_project_lineage(self):
+        with create_runtime(":memory:") as runtime:
+            root = runtime.orchestrator.create_task(
+                task_id="project-root", objective="Build project",
+                acceptance_criteria=["Project works."], role="backend-developer",
+            )
+            consultation = ConsultationRecord(
+                consultation_id="consult-failed-advice", task_id="project-root",
+                requesting_role="backend-developer", should_consult=True,
+                specialist_role="architect", question="How should modules connect?",
+                reason="A design boundary is unclear.",
+                advice="Put all data access directly in the UI layer.",
+                risks=(), next_steps=("Move access into UI.",), confidence="high",
+                created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            runtime.store.save_consultation(consultation)
+            runtime.store.save_consultation_outcome(ConsultationOutcome(
+                outcome_id="outcome-failed-advice",
+                consultation_id=consultation.consultation_id, task_id="project-root",
+                disposition="followed", worker_reason="The UI now owns all data access.",
+                qa_status="failed", qa_run_id="qa-failed",
+                evidence_refs=("evidence:integration-failure",),
+                created_at=datetime(2026, 11, 19, 11, 0, tzinfo=timezone.utc),
+            ))
+            repair = WorkerTask(
+                task_id="repair-task", parent_task_id="project-root",
+                role="backend-developer", objective="Repair integration failure.",
+                acceptance_criteria=("Data access is correctly layered.",),
+                evidence_refs=(), workspace_group_id=root.task.workspace_group_id,
+            )
+            caution = runtime.consultation_cautions_for_task(repair)
+            self.assertIn("Previously attempted specialist advice", caution)
+            self.assertIn("failed", caution)
+            self.assertIn("evidence:integration-failure", caution)
+
+            unrelated = WorkerTask(
+                task_id="other-project-repair", parent_task_id="project-root",
+                role="backend-developer", objective="Unrelated repair.",
+                acceptance_criteria=("No cross-project context.",),
+                evidence_refs=(), workspace_group_id="different-project",
+            )
+            self.assertEqual(runtime.consultation_cautions_for_task(unrelated), "")
 
     def test_invalid_approval_ttl_is_rejected(self):
         with self.assertRaises(ValueError):
