@@ -28,7 +28,7 @@ class WorkspaceTests(unittest.TestCase):
         )
 
     def test_rejects_traversal_and_absolute_paths(self):
-        for path in ("../outside.txt", "src/../../outside.txt", "/etc/passwd", "C:\\Windows\\win.ini", "~/secret"):
+        for path in ("../outside.txt", "src/../../outside.txt", "/etc/passwd", "C:\\Windows\\win.ini", "\\\\server\\share\\secret", "~/secret"):
             with self.subTest(path=path), self.assertRaises(WorkspaceError):
                 self.workspace.resolve_path(path)
 
