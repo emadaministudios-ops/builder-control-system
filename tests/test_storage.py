@@ -190,6 +190,75 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
                 self.assertEqual(version, 8)
                 self.assertEqual(store.list_consultations(), ())
 
+    def test_integration_qa_assessment_is_durable_and_idempotent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bcs.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            commit_sha = "a" * 40
+            store.save_integration_run({
+                "integration_id": "integration-qa", "branch": "bcs/integration/test",
+                "path": str(Path(folder) / "worktree"), "status": "awaiting_qa",
+                "included_groups": ("group-1",), "commits": ("b" * 40,),
+                "conflicts": (), "reason": "Ready for QA.", "commit_sha": commit_sha,
+            })
+            assessment = {
+                "integration_id": "integration-qa", "commit_sha": commit_sha,
+                "qa_run_id": "qa-1", "task_id": "task-1", "status": "passed",
+                "executed_check_count": 1, "evidence_refs": ("ev-1",),
+                "checks": ({"check_id": "unit", "status": "passed", "executed": True},),
+                "started_at": "2026-11-19T10:00:00+00:00",
+                "finished_at": "2026-11-19T10:01:00+00:00",
+            }
+            store.save_integration_qa_assessment(assessment)
+            store.save_integration_qa_assessment(assessment)
+            self.assertEqual(1, len(store.list_integration_qa_assessments("integration-qa")))
+            store.close()
+            reopened = SQLiteOrchestrationStore(path)
+            self.assertEqual(assessment["commit_sha"], reopened.list_integration_qa_assessments("integration-qa")[0]["commit_sha"])
+            reopened.close()
+
+    def test_integration_qa_rejects_unknown_integration_and_wrong_commit(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "bcs.sqlite3")
+            record = {
+                "integration_id": "missing", "commit_sha": "a" * 40,
+                "qa_run_id": "qa-orphan", "task_id": "task-1", "status": "passed",
+                "executed_check_count": 1, "evidence_refs": ("ev-1",),
+                "checks": (), "started_at": "2026-11-19T10:00:00+00:00",
+                "finished_at": "2026-11-19T10:01:00+00:00",
+            }
+            with self.assertRaises(StorageError):
+                store.save_integration_qa_assessment(record)
+            store.save_integration_run({
+                "integration_id": "known", "branch": "bcs/integration/known",
+                "path": str(Path(folder) / "worktree"), "status": "awaiting_qa",
+                "included_groups": ("group-1",), "commits": ("b" * 40,),
+                "conflicts": (), "reason": "Ready.", "commit_sha": "c" * 40,
+            })
+            record["integration_id"] = "known"
+            with self.assertRaises(StorageError):
+                store.save_integration_qa_assessment(record)
+            store.close()
+
+    def test_integration_qa_pass_requires_executed_check(self):
+        with tempfile.TemporaryDirectory() as folder:
+            store = SQLiteOrchestrationStore(Path(folder) / "bcs.sqlite3")
+            store.save_integration_run({
+                "integration_id": "no-execution", "branch": "bcs/integration/no-execution",
+                "path": str(Path(folder) / "worktree"), "status": "awaiting_qa",
+                "included_groups": ("group-1",), "commits": ("b" * 40,),
+                "conflicts": (), "reason": "Ready.", "commit_sha": "d" * 40,
+            })
+            record = {
+                "integration_id": "no-execution", "commit_sha": "d" * 40,
+                "qa_run_id": "qa-no-exec", "task_id": "task-1", "status": "passed",
+                "executed_check_count": 0, "evidence_refs": (), "checks": (),
+                "started_at": "2026-11-19T10:00:00+00:00",
+                "finished_at": "2026-11-19T10:01:00+00:00",
+            }
+            with self.assertRaises(StorageError):
+                store.save_integration_qa_assessment(record)
+            store.close()
     def test_memory_database_supported(self):
         with SQLiteOrchestrationStore(":memory:") as store:
             store.save_task(self.record())
