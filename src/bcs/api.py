@@ -172,8 +172,23 @@ def create_app(
     active_authenticator = authenticator or TokenAuthenticator.from_environment()
     active_git_manager = git_manager if git_manager is not None else _git_manager_from_environment()
     registered_workers = _register_default_workers(active_runtime, active_git_manager)
+    execution_handler = None
+    if active_git_manager is not None and active_runtime.providers.provider_ids():
+        mode_name = os.environ.get("BCS_WORKER_MODE", "autonomous").strip().lower()
+        try:
+            qa_mode = OperatingMode(mode_name)
+        except ValueError as exc:
+            raise RuntimeError("BCS_WORKER_MODE must be supervised or autonomous.") from exc
+        qa_supervisor = active_runtime.create_qa_supervisor(
+            workspace_factory=active_git_manager.workspace_for_task,
+            mode=qa_mode,
+        )
+        execution_handler = lambda job: active_runtime.execute_plan_with_qa(
+            job["task_ids"], qa_supervisor
+        )
     active_job_service = execution_job_service or ExecutionJobService(
-        active_runtime.store, active_runtime.scheduler
+        active_runtime.store, active_runtime.scheduler,
+        execution_handler=execution_handler,
     )
 
     @asynccontextmanager
