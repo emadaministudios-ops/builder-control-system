@@ -314,10 +314,18 @@ def create_app(
         require_scope(principal, "tasks:execute")
         if principal.actor_type.value != "human":
             raise HTTPException(status_code=403, detail="Only an authenticated human may enqueue task execution.")
+        if len(set(payload.task_ids)) != len(payload.task_ids):
+            raise HTTPException(status_code=422, detail="A dispatch request may contain each task only once.")
         try:
+            records = []
             for task_id in payload.task_ids:
-                if active_runtime.orchestrator.get_task(task_id) is None:
+                record = active_runtime.orchestrator.get_task(task_id)
+                if record is None:
                     raise KeyError(task_id)
+                records.append(record)
+            selected = set(payload.task_ids)
+            if any(set(record.task.dependency_ids) - selected for record in records):
+                raise ValueError("Dispatch request must include every task prerequisite.")
             job = active_job_service.enqueue(payload.task_ids, principal.actor_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="A submitted task does not exist.") from exc
