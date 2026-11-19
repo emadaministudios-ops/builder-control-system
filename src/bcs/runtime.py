@@ -13,7 +13,7 @@ from pathlib import Path
 from .approvals import ApprovalService
 from .feedback import FeedbackController
 from .qa import EvidenceStore
-from .qa_supervisor import QAReview, build_qa_report
+from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
@@ -93,6 +93,50 @@ class BCSRuntime:
         feedback_snapshot = self.feedback.record_qa_report(report)
         repair_task_ids = self.orchestrator.ingest_qa_report(report)
         return report, feedback_snapshot, repair_task_ids
+
+    def create_qa_supervisor(
+        self,
+        *,
+        workspace_factory,
+        worker_id: str = "qa-supervisor",
+        mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        provider_id: str | None = None,
+    ) -> QASupervisor:
+        """Create an independent read-only QA reviewer for trusted task workspaces."""
+        if not callable(workspace_factory):
+            raise TypeError("A trusted QA workspace factory is required.")
+
+        def gateway_factory(task: WorkerTask) -> WorkspaceToolGateway:
+            workspace = workspace_factory(task)
+            if not isinstance(workspace, Workspace):
+                raise TypeError("Workspace factory must return a trusted Workspace.")
+            grants = frozenset({"workspace.read"})
+            context = PolicyContext(
+                mode=mode,
+                task_id=task.task_id,
+                worker_id=worker_id,
+                workspace_id=workspace.workspace_id,
+                expected_workspace_id=workspace.workspace_id,
+                task_active=True,
+                worker_active=True,
+                task_capabilities=grants,
+                worker_capabilities=grants,
+            )
+            return WorkspaceToolGateway(workspace, context, self.approvals)
+
+        return QASupervisor(
+            providers=self.providers,
+            gateway_factory=gateway_factory,
+            provider_id=provider_id,
+        )
+
+    def review_and_handoff(self, task: WorkerTask, result, supervisor: QASupervisor):
+        """Run three-pass QA, persist its report, and enqueue any repair tasks."""
+        review = supervisor.review(task, result)
+        if review.status.value == "blocked":
+            return review, None, None, ()
+        report, feedback_snapshot, repair_task_ids = self.apply_qa_review(review)
+        return review, report, feedback_snapshot, repair_task_ids
 
     def close(self) -> None:
         self.store.close()
