@@ -897,10 +897,10 @@ class BCSRuntime:
             raise GitWorktreeError(
                 "QA modified tracked integration files; report was not attached."
             )
-        self.attach_qa_report_to_integration(integration_id, report)
+        self._attach_qa_report_to_integration(integration_id, report)
         return report
 
-    def attach_qa_report_to_integration(self, integration_id: str, report: QAReport):
+    def _attach_qa_report_to_integration(self, integration_id: str, report: QAReport):
         """Attach a validated report to an integration's exact recorded commit."""
         if not isinstance(report, QAReport):
             raise TypeError("A validated QAReport is required.")
@@ -923,9 +923,19 @@ class BCSRuntime:
         }:
             raise ValueError("QA report task does not belong to this integration.")
         executed_count = sum(1 for check in report.checks if check.executed)
+        for check in report.checks:
+            if check.executed and (
+                not check.evidence_ref
+                or self.evidence_store.get(check.evidence_ref) is None
+            ):
+                raise ValueError("Executed QA checks must reference retained execution evidence.")
         status = report.status.value
         if status == "passed" and executed_count == 0:
             status = "not_assessed"
+        if status == "passed" and any(
+            check.status is not QACheckStatus.PASSED for check in report.checks
+        ):
+            raise ValueError("A passed integration QA report cannot contain a non-passing check.")
         checks = tuple({
             "check_id": check.check_id,
             "status": check.status.value,
