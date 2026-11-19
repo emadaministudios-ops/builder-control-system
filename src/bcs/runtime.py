@@ -823,6 +823,7 @@ class BCSRuntime:
             "commits": result.commits,
             "conflicts": result.conflicts,
             "reason": result.reason,
+            "commit_sha": result.commit_sha,
         })
         return result
 
