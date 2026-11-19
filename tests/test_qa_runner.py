@@ -39,6 +39,26 @@ class QARunnerTests(unittest.TestCase):
         self.assertEqual(report.checks[1].status, QACheckStatus.FAILED)
         self.assertIsNotNone(self.store.get(report.checks[0].evidence_ref))
 
+
+    def test_evidence_store_loads_persisted_artifact_after_restart(self):
+        import tempfile
+        from pathlib import Path
+        from bcs.storage import SQLiteOrchestrationStore
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "runtime.sqlite3"
+            repository = SQLiteOrchestrationStore(path)
+            durable = EvidenceStore(repository=repository)
+            ref = durable.put_execution("stdout survives", "stderr survives")
+            repository.close()
+
+            reopened = SQLiteOrchestrationStore(path)
+            recovered = EvidenceStore(repository=reopened).get(ref)
+            self.assertIsNotNone(recovered)
+            self.assertEqual(recovered.stdout, "stdout survives")
+            self.assertEqual(recovered.stderr, "stderr survives")
+            self.assertEqual(recovered.content_sha256, durable._items[ref].content_sha256)
+            reopened.close()
+
     def test_blocked_check_is_reported_without_claiming_execution(self):
         self.executor.execute.side_effect = [ExecutionResult("blocked", "Approval needed.")]
         report = self.runner.run(
