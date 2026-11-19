@@ -12,6 +12,7 @@ from pathlib import Path
 
 from .approvals import ApprovalService
 from .orchestrator import Orchestrator
+from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
 
 
@@ -22,6 +23,7 @@ class BCSRuntime:
     store: SQLiteOrchestrationStore
     orchestrator: Orchestrator
     approvals: ApprovalService
+    providers: ProviderRegistry
 
     def close(self) -> None:
         self.store.close()
@@ -38,6 +40,8 @@ def create_runtime(
     *,
     approval_ttl_seconds: int = 900,
     max_attempts: int = 2,
+    provider_configs: tuple[ProviderConfig, ...] | None = None,
+    default_provider_id: str | None = None,
 ) -> BCSRuntime:
     """Create a configured runtime, sharing one durable store across services.
 
@@ -55,6 +59,24 @@ def create_runtime(
     resolved_path = Path(configured_path or "./data/bcs.sqlite3")
     store = SQLiteOrchestrationStore(resolved_path)
     try:
+        configs = (
+            provider_configs_from_environment()
+            if provider_configs is None else tuple(provider_configs)
+        )
+        providers = ProviderRegistry(
+            default_provider_id=(
+                default_provider_id or os.environ.get("BCS_DEFAULT_PROVIDER")
+            )
+        )
+        for config in configs:
+            providers.register(
+                config,
+                make_default=(config.provider_id == default_provider_id),
+            )
+        if providers.default_provider_id is not None and (
+            providers.default_provider_id not in providers.provider_ids()
+        ):
+            raise ValueError("Configured default model provider is not registered.")
         orchestrator = Orchestrator(max_attempts=max_attempts, store=store)
         approvals = ApprovalService(
             ttl=timedelta(seconds=approval_ttl_seconds), store=store
@@ -63,6 +85,7 @@ def create_runtime(
             store=store,
             orchestrator=orchestrator,
             approvals=approvals,
+            providers=providers,
         )
     except Exception:
         store.close()
