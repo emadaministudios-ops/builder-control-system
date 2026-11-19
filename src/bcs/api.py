@@ -475,7 +475,7 @@ def create_app(
         except ProviderError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="BCS model provider is not ready. Configure the server-side provider credentials and retry.",
+                detail=f"BCS model provider request failed: {str(exc)}",
             ) from exc
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(
