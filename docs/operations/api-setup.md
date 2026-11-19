@@ -82,7 +82,8 @@ The default bind address is loopback for local development. For cloud hosting, p
 | GET | `/v1/tasks` | `tasks:read` |
 | GET | `/v1/approvals` | `approvals:read` |
 | POST | `/v1/approvals/{request_id}/decision` | Human principal with `approvals:decide` |
-| GET | `/v1/feedback/{task_id}` | `tasks:read` |\n| GET | `/v1/integrations` | `integrations:read` |\n| GET | `/v1/integrations/{integration_id}/qa` | `integrations:read` |\n| GET | `/v1/integration-promotions` | `integrations:read` |\n| POST | `/v1/integrations/{integration_id}/promotion-requests` | Human principal with `integrations:promote` |\n| POST | `/v1/integration-promotions/{request_id}/execute` | Human principal with `integrations:promote`, after approval |
+| GET | `/v1/feedback/{task_id}` | `tasks:read` |\n| GET | `/v1/integrations` | `integrations:read` |\n| GET | `/v1/integrations/{integration_id}/qa` | `integrations:read` |
+| POST | `/v1/integrations/{integration_id}/qa` | Human principal with `qa:execute`; server-owned profile only |\n| GET | `/v1/integration-promotions` | `integrations:read` |\n| POST | `/v1/integrations/{integration_id}/promotion-requests` | Human principal with `integrations:promote` |\n| POST | `/v1/integration-promotions/{request_id}/execute` | Human principal with `integrations:promote`, after approval |
 
 When a trusted Git manager and at least one model provider are configured, the app factory registers the standard specialist roles against isolated Git worktrees. QA execution output is persisted as immutable evidence artifacts in the same SQLite database, with captured stdout/stderr, byte size and SHA-256 integrity verification. Integration QA history keeps the evidence references bound to the exact integration commit. The default artifact limit is 200 KB (maximum configurable size 2 MB); production deployments still need encrypted durable backups, retention controls and suitable access management.
 
@@ -107,3 +108,21 @@ Configure at least one model endpoint before launching the API. For local Ollama
 Set `BCS_GIT_REPOSITORY_ROOT` to the trusted source checkout and `BCS_GIT_WORKTREE_ROOT` to a persistent directory outside that checkout. The source checkout must already contain the local `development` branch. The manager provisions a separate worktree per task workspace group. The app factory registers nine specialist roles when both the manager and a provider are available. The default worker mode is bounded autonomous file editing; set `BCS_WORKER_MODE=supervised` to require approvals for writes. Model workers cannot execute shell commands, run tests, deploy, or approve releases. QA/test execution remains a separate sandboxed workflow.
 
 The development API uses a durable SQLite-backed queue and a process-local runner. The job record survives browser disconnects and process restarts; queued jobs and expired leases can be reclaimed. Execution is at-least-once, not exactly-once: a crash after a worker changes files but before job completion is committed can cause a reclaimed job to revisit its task IDs. The orchestrator fails in-flight task records closed on restart, so inspect task/workspace state before retrying uncertain work. SQLite is suitable for this single-instance development adapter, not a multi-replica cloud queue; production needs shared PostgreSQL/Redis-backed leasing, distributed worker coordination, monitoring and explicit recovery tooling.
+
+
+## 6. Executable integration QA profiles
+
+The operator may configure named, immutable test profiles through `BCS_QA_PROFILES_JSON`. Clients submit only a profile ID to `POST /v1/integrations/{integration_id}/qa`; they cannot supply command arguments, Docker images, repository paths or resource limits. Every profile command's executable must appear in the comma-separated `BCS_QA_ALLOWED_EXECUTABLES` allowlist. Configure `BCS_QA_DOCKER_IMAGE` and include that exact image in `BCS_QA_ALLOWED_IMAGES`. `BCS_DOCKER_EXECUTABLE` defaults to `docker`; `BCS_QA_MODE` defaults to `BCS_WORKER_MODE` (or `autonomous`) and accepts `supervised` or `autonomous`.
+
+Example operator configuration:
+
+```bash
+BCS_QA_PROFILES_JSON='{"python-unit":[{"check_id":"unit","name":"Python unit tests","argv":["python","-m","unittest","discover","-s","tests"]}]}'
+BCS_QA_ALLOWED_EXECUTABLES='python,pytest'
+BCS_QA_DOCKER_IMAGE='bcs-qa:stable'
+BCS_QA_ALLOWED_IMAGES='bcs-qa:stable'
+BCS_QA_MODE='autonomous'
+```
+
+The route requires a human principal with `qa:execute`, checks the integration checkout against its recorded commit, and invokes the existing network-disabled Docker sandbox. The API call is synchronous in this development implementation; sandbox time and output limits still apply, but a long-running request can outlive a client connection. A later queue integration should make QA dispatch itself a durable background job. A successful result is recorded as `passed` only when at least one command actually executed and every check passed; static-only assessments remain `not_assessed`. No profile is enabled by default, and no test command is inferred from untrusted project files.
+
