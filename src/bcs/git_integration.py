@@ -22,6 +22,7 @@ class IntegrationResult:
     status: str
     included_groups: tuple[str, ...]
     commits: tuple[str, ...]
+    commit_sha: str = ""
     conflicts: tuple[str, ...] = ()
     reason: str = ""
 
@@ -160,6 +161,11 @@ class GitIntegrationCoordinator:
                         reason="Git reported a content conflict; integration stopped and no worker branch was changed.",
                     )
 
+            commit_sha = self.manager._run(
+                ["rev-parse", "HEAD"], cwd=integration_path
+            ).stdout.strip()
+            if not re.fullmatch(r"[0-9a-f]{40,64}", commit_sha):
+                raise GitWorktreeError("Could not establish the exact integrated commit.")
             return IntegrationResult(
                 integration_id=integration_id,
                 branch=branch,
@@ -167,7 +173,8 @@ class GitIntegrationCoordinator:
                 status="awaiting_qa",
                 included_groups=tuple(included),
                 commits=tuple(applied),
-                reason="Changes were combined on an isolated integration branch. QA and human review are still required.",
+                commit_sha=commit_sha,
+                reason="Changes were combined on an isolated integration branch. Exact commit is recorded; QA and human review are still required.",
             )
 
 
