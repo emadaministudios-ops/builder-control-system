@@ -49,6 +49,59 @@ class TaskScheduler:
         self.max_batch_size = max_batch_size
         self._dispatch_lock = threading.Lock()
 
+    def dispatch_plan(self, task_ids) -> SchedulerResult:
+        """Execute dependency-ready waves until no queued step can progress."""
+        selected = tuple(task_ids)
+        if len(selected) > self.max_batch_size:
+            raise ValueError("Plan exceeds the configured queue limit.")
+        if len(set(selected)) != len(selected):
+            raise ValueError("A plan may contain each task only once.")
+        selected_set = set(selected)
+        for task_id in selected:
+            record = self.orchestrator.get_task(task_id)
+            if record is None:
+                raise KeyError("Plan references an unknown task.")
+            if set(record.task.dependency_ids) - selected_set:
+                raise ValueError("Plan contains prerequisites outside the submitted plan.")
+        outcomes = {}
+        while True:
+            ready = []
+            for task_id in selected:
+                if task_id in outcomes:
+                    continue
+                record = self.orchestrator.get_task(task_id)
+                if record.state.value != "queued":
+                    continue
+                prerequisites = [self.orchestrator.get_task(item) for item in record.task.dependency_ids]
+                if all(item is not None and item.state.value == "completed" for item in prerequisites):
+                    ready.append(task_id)
+            if not ready:
+                break
+            wave = self.dispatch_independent(ready)
+            for outcome in wave.outcomes:
+                outcomes[outcome.task_id] = outcome
+            if any(item.state.value == "queued" for item in wave.outcomes):
+                break
+        for task_id in selected:
+            if task_id not in outcomes:
+                record = self.orchestrator.get_task(task_id)
+                outcomes[task_id] = DispatchOutcome(
+                    task_id=task_id,
+                    state=record.state,
+                    worker_id=record.assigned_worker_id,
+                    result=record.result,
+                    reason=(
+                        "Waiting for a prerequisite that has not completed."
+                        if record.state.value == "queued"
+                        else "Task was already processed before this scheduling run."
+                    ),
+                )
+        return SchedulerResult(
+            tuple(outcomes[task_id] for task_id in selected),
+            len(selected),
+            self.max_concurrency,
+        )
+
     def dispatch_independent(self, task_ids) -> SchedulerResult:
         """Dispatch a caller-verified independent batch, preserving input order."""
         if isinstance(task_ids, (str, bytes)):
