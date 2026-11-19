@@ -187,6 +187,8 @@ class ModelWorker:
                 WorkerResultStatus.BLOCKED,
                 proposal["summary"],
                 blockers=("The model proposed no file changes; further direction or context is needed.",),
+                consultation_disposition=proposal["consultation_disposition"],
+                consultation_reason=proposal["consultation_reason"],
             )
 
         try:
