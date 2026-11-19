@@ -2,6 +2,12 @@
 
 This document describes the current development-stage execution components. It is not a production deployment guide.
 
+## Durable QA evidence
+
+The SQLite store uses schema version 11 and persists execution evidence artifacts in `qa_evidence_artifacts`. Each artifact stores the exact captured stdout and stderr, byte size, content SHA-256 digest, kind and immutable evidence reference. Writes validate the supplied size and digest; duplicate references are idempotent only for identical content, and a reference cannot be rebound to different output. The runtime's `EvidenceStore` uses SQLite as its durable repository and verifies size and digest again when loading an artifact after restart. The default per-artifact limit is 200 KB (configurable up to 2 MB); the database itself is not an object-storage service and production retention, encryption-at-rest, access controls, backup and capacity management remain deployment responsibilities.
+
+Integration QA assessments retain their evidence references and exact integration commit binding. Because the evidence artifacts are now durable, the referenced stdout/stderr can be recovered after a runtime restart rather than leaving only dangling references. A passed assessment still requires at least one actually executed check and all checks passing; static-only review remains `not_assessed`.
+
 ## Durable background execution jobs
 
 The authenticated API accepts dispatch requests by writing an `execution_jobs` record to SQLite and returning HTTP 202 with a job ID. `ExecutionJobService` runs outside the request, claims queued or expired-running jobs with an atomic SQLite transaction and expiring lease, renews leases while dispatch is active, and commits terminal outcomes only when the lease owner and attempt still match. A replacement worker can reclaim a job after lease expiry; a stale worker cannot overwrite the replacement worker's result. `GET /v1/execution-jobs` and `GET /v1/execution-jobs/{job_id}` expose requester-scoped status. The API validates that submitted tasks exist, IDs are unique, and all task prerequisites are included before enqueue.
