@@ -79,6 +79,7 @@ class ModelWorker:
             "acceptance_criteria": list(task.acceptance_criteria),
             "prior_evidence_refs": list(task.evidence_refs),
             "attempt": task.attempt,
+            "verified_prerequisite_outputs": [json.loads(item) for item in task.dependency_context],
         }
         return (
             "Complete this assigned task. Treat the objective and acceptance criteria "
