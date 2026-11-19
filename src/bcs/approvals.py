@@ -51,12 +51,22 @@ class ApprovalError(ValueError):
 class ApprovalService:
     """Thread-safe approval state machine; identity must be authenticated upstream."""
 
-    def __init__(self, ttl: timedelta = timedelta(minutes=15)) -> None:
+    def __init__(self, ttl: timedelta = timedelta(minutes=15), *, store=None) -> None:
         if ttl <= timedelta(0):
             raise ValueError("Approval TTL must be positive.")
+        if store is not None and not all(
+            callable(getattr(store, name, None))
+            for name in ("list_approvals", "save_approval")
+        ):
+            raise TypeError("store must implement the approval repository contract.")
         self._ttl = ttl
+        self._store = store
         self._records: dict[str, ApprovalRequest] = {}
         self._lock = RLock()
+        if self._store is not None:
+            self._records = {
+                record.request_id: record for record in self._store.list_approvals()
+            }
 
     def submit(self, request: ToolRequest, *, now: datetime | None = None) -> ApprovalRequest:
         if not request.request_id or not request.task_id or not request.worker_id:
@@ -83,6 +93,8 @@ class ApprovalService:
                 created_at=created_at,
                 expires_at=created_at + self._ttl,
             )
+            if self._store is not None:
+                self._store.save_approval(record)
             self._records[request.request_id] = record
             return record
 
@@ -114,6 +126,8 @@ class ApprovalService:
                 expired = ApprovalRequest(
                     **{**record.__dict__, "status": ApprovalStatus.EXPIRED}
                 )
+                if self._store is not None:
+                    self._store.save_approval(expired)
                 self._records[request_id] = expired
                 raise ApprovalError("Approval request has expired.")
 
@@ -126,6 +140,8 @@ class ApprovalService:
                     "reason": reason.strip() or None,
                 }
             )
+            if self._store is not None:
+                self._store.save_approval(updated)
             self._records[request_id] = updated
             return updated
 
@@ -141,6 +157,8 @@ class ApprovalService:
                 record = ApprovalRequest(
                     **{**record.__dict__, "status": ApprovalStatus.EXPIRED}
                 )
+                if self._store is not None:
+                    self._store.save_approval(record)
                 self._records[request_id] = record
             return record
 
