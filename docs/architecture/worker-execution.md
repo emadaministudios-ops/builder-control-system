@@ -74,7 +74,7 @@ Current limitation: the worker does not yet have a complete iterative tool loop 
 
 If Git reports a content conflict, the coordinator aborts the in-progress cherry-pick and returns the conflicting paths. Worker branches remain unchanged; already-applied commits remain only on the isolated integration branch. A conflict result must be resolved by a repair/integration worker and reviewed again.
 
-A conflict-free result is marked `awaiting_qa`, not passed or releasable. The coordinator does not push, update `development`, update `main`, or approve promotion. QA execution, durable integration-run records, restart recovery and explicit human promotion approval remain separate follow-up work. The integration coordinator is currently an explicit controller service, not automatically invoked by every completed task.
+A conflict-free result is marked `awaiting_qa`, not passed or releasable. The coordinator does not push, update `development`, update `main`, or approve promotion. QA execution, durable integration-run records, restart recovery and explicit human promotion approval remain separate follow-up work. The integration coordinator is currently an explicit controller service, not automatically invoked by every completed task. `BCSRuntime.integrate_completed_work(...)` is the guarded runtime entry point: it checks the durable orchestration snapshot and refuses integration if any task in a requested workspace group is queued, running, blocked or failed. Only groups whose tasks are all completed are passed to the Git coordinator. This completion gate is separate from QA: the returned branch remains `awaiting_qa`, and the runtime does not promote it.
  
 ## Controller-managed Git worktrees
 
