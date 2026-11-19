@@ -89,6 +89,7 @@ def create_app(
     *,
     runtime: BCSRuntime | None = None,
     authenticator: TokenAuthenticator | None = None,
+    git_manager=None,
 ) -> FastAPI:
     """Create the BCS API with injected or environment-configured services."""
     owns_runtime = runtime is None
@@ -109,6 +110,8 @@ def create_app(
     )
     app.state.bcs_runtime = active_runtime
     app.state.bcs_authenticator = active_authenticator
+    # The Git manager is trusted server configuration; clients cannot supply paths or repositories.
+    app.state.bcs_git_manager = git_manager
 
     def require_principal(request: Request) -> Principal:
         try:
@@ -273,6 +276,66 @@ def create_app(
                 for cycle in snapshot.cycles
             ],
         }
+
+    @app.get("/v1/integrations")
+    def list_integrations(principal: Principal = Depends(require_principal)):
+        require_scope(principal, "integrations:read")
+        return {"integrations": _json_value(active_runtime.integration_history())}
+
+    @app.get("/v1/integrations/{integration_id}/qa")
+    def list_integration_qa(
+        integration_id: str,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "integrations:read")
+        if not any(item["integration_id"] == integration_id for item in active_runtime.integration_history()):
+            raise HTTPException(status_code=404, detail="Integration not found.")
+        return {"assessments": _json_value(active_runtime.integration_qa_history(integration_id))}
+
+    @app.get("/v1/integration-promotions")
+    def list_integration_promotions(principal: Principal = Depends(require_principal)):
+        require_scope(principal, "integrations:read")
+        return {"promotion_requests": _json_value(active_runtime.integration_promotion_history())}
+
+    @app.post("/v1/integrations/{integration_id}/promotion-requests", status_code=status.HTTP_201_CREATED)
+    def request_integration_promotion(
+        integration_id: str,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "integrations:promote")
+        if principal.actor_type.value != "human":
+            raise HTTPException(status_code=403, detail="Only an authenticated human may request promotion.")
+        manager = app.state.bcs_git_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Git promotion is not configured on this API instance.")
+        try:
+            approval = active_runtime.request_integration_promotion(
+                manager=manager, integration_id=integration_id
+            )
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Integration not found.") from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"approval": _approval_view(approval)}
+
+    @app.post("/v1/integration-promotions/{request_id}/execute")
+    def execute_integration_promotion(
+        request_id: str,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "integrations:promote")
+        if principal.actor_type.value != "human":
+            raise HTTPException(status_code=403, detail="Only an authenticated human may execute promotion.")
+        manager = app.state.bcs_git_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Git promotion is not configured on this API instance.")
+        try:
+            record = active_runtime.promote_integration(manager=manager, request_id=request_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Promotion request not found.") from exc
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {"promotion": _json_value(record)}
 
     return app
 
