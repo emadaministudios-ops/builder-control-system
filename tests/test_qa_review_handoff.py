@@ -173,7 +173,7 @@ class QAReviewHandoffTests(unittest.TestCase):
         finally:
             runtime.close()
 
-    def test_execute_with_qa_stops_when_repair_worker_is_unavailable(self):
+    def test_execute_with_qa_escalates_when_fallback_repair_worker_is_blocked(self):
         class RepairSupervisor:
             def review(self, task, result):
                 return QAReview(
@@ -198,16 +198,23 @@ class QAReviewHandoffTests(unittest.TestCase):
             )
             runtime.orchestrator.register_worker(
                 worker_id="builder", role="builder",
-                handler=lambda task: WorkerResult(
-                    WorkerResultStatus.COMPLETED, "Initial work.",
-                    changed_files=("src/api.py",),
+                handler=lambda task: (
+                    WorkerResult(
+                        WorkerResultStatus.BLOCKED, "Repair needs additional context.",
+                        blockers=("Missing API design decision.",),
+                    )
+                    if task.parent_task_id == "blocked-auto"
+                    else WorkerResult(
+                        WorkerResultStatus.COMPLETED, "Initial work.",
+                        changed_files=("src/api.py",),
+                    )
                 ),
             )
             outcome = runtime.execute_with_qa(
                 "blocked-auto", RepairSupervisor(), max_repair_rounds=1
             )
             self.assertEqual(outcome.state, FeedbackState.HUMAN_ATTENTION)
-            self.assertIn("no available specialist", outcome.reason)
+            self.assertIn("repair worker failed, was blocked", outcome.reason)
             self.assertEqual(runtime.orchestrator.get_task("blocked-auto").state, TaskState.COMPLETED)
         finally:
             runtime.close()
