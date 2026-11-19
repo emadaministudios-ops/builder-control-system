@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import threading
 
 from .providers import ProviderError, ProviderRegistry
 
@@ -48,6 +49,8 @@ class SpecialistConsultant:
         self.max_calls = max_calls
         self.max_context_chars = max_context_chars
         self.max_tokens = max_tokens
+        self._calls = 0
+        self._lock = threading.Lock()
 
     @staticmethod
     def _text(value: str, label: str, maximum: int) -> str:
@@ -57,6 +60,10 @@ class SpecialistConsultant:
 
     def consult(self, *, requesting_role: str, specialist_role: str,
                 objective: str, question: str, context: str = "") -> SpecialistAdvice:
+        with self._lock:
+            if self._calls >= self.max_calls:
+                raise ConsultationError("Consultation call limit has been reached.")
+            self._calls += 1
         requester = self._text(requesting_role, "Requesting role", 80)
         specialist = self._text(specialist_role, "Specialist role", 80)
         if requester not in ALLOWED_SPECIALIST_ROLES or specialist not in ALLOWED_SPECIALIST_ROLES:
