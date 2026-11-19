@@ -32,11 +32,11 @@ class EvidenceArtifact:
 
 
 class EvidenceStore:
-    """Thread-safe in-memory evidence store; replace with durable object storage later."""
+    """Thread-safe evidence cache backed by an optional durable repository."""
 
     def __init__(self, max_artifact_bytes: int = 200_000, *, repository=None) -> None:
-        if max_artifact_bytes < 1:
-            raise ValueError("Evidence size limit must be positive.")
+        if isinstance(max_artifact_bytes, bool) or not isinstance(max_artifact_bytes, int) or not 1 <= max_artifact_bytes <= 2_000_000:
+            raise ValueError("Evidence size limit must be between 1 byte and 2 MB.")
         self._max_bytes = max_artifact_bytes
         self._items: dict[str, EvidenceArtifact] = {}
         self._repository = repository
