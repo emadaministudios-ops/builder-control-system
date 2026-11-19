@@ -136,8 +136,10 @@ class OpenAICompatibleProvider:
             ) as response:
                 raw = response.read(self.config.max_response_bytes + 1)
         except urllib.error.HTTPError as exc:
+            status_code = exc.code
             exc.close()
-            raise ProviderError("Model provider returned an HTTP error.") from None
+            # Expose only the HTTP status, never provider response bodies or credentials.
+            raise ProviderError(f"Model provider returned HTTP {status_code}.") from None
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise ProviderError("Could not reach the configured model provider.") from None
 
