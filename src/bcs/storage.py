@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from .approvals import ApprovalRequest
     from .feedback import FeedbackCycle
 
-_SCHEMA_VERSION = 10
+_SCHEMA_VERSION = 11
 
 
 class StorageError(RuntimeError):
@@ -192,6 +192,16 @@ class SQLiteOrchestrationStore:
                             lease_owner TEXT,
                             lease_expires_at TEXT,
                             attempt INTEGER NOT NULL DEFAULT 0,
+                            payload TEXT NOT NULL CHECK (json_valid(payload))
+                        )
+                    """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS qa_evidence_artifacts (
+                            evidence_ref TEXT PRIMARY KEY,
+                            kind TEXT NOT NULL,
+                            content_sha256 TEXT NOT NULL,
+                            size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+                            created_at TEXT NOT NULL,
                             payload TEXT NOT NULL CHECK (json_valid(payload))
                         )
                     """)
@@ -1096,6 +1106,83 @@ class SQLiteOrchestrationStore:
                 ORDER BY created_at DESC, job_id DESC LIMIT ?
             """, (requested_by, limit)).fetchall()
         return tuple(self._decode_execution_job(row["payload"]) for row in rows)
+
+
+    def save_qa_evidence_artifact(self, artifact: dict) -> None:
+        """Persist bounded, immutable execution output with an integrity digest."""
+        required = {"evidence_ref", "kind", "content_sha256", "size_bytes", "stdout", "stderr"}
+        if not isinstance(artifact, dict) or set(artifact) != required:
+            raise StorageError("QA evidence artifact has an invalid shape.")
+        for key in ("evidence_ref", "kind", "content_sha256", "stdout", "stderr"):
+            if not isinstance(artifact[key], str):
+                raise StorageError("QA evidence artifact fields must be strings.")
+        if not artifact["evidence_ref"].startswith("ev_") or not artifact["kind"]:
+            raise StorageError("QA evidence identity is invalid.")
+        size = artifact["size_bytes"]
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0 or size > 2_000_000:
+            raise StorageError("QA evidence size is outside the allowed range.")
+        import hashlib
+        raw = (artifact["stdout"] + "\n--- STDERR ---\n" + artifact["stderr"]).encode("utf-8")
+        if len(raw) != size or hashlib.sha256(raw).hexdigest() != artifact["content_sha256"]:
+            raise StorageError("QA evidence digest or size does not match its content.")
+        payload = self._json({
+            "version": 1, "evidence_ref": artifact["evidence_ref"],
+            "kind": artifact["kind"], "content_sha256": artifact["content_sha256"],
+            "size_bytes": size, "stdout": artifact["stdout"], "stderr": artifact["stderr"],
+        })
+        created_at = datetime.now().astimezone().isoformat()
+        with self._lock:
+            try:
+                with self._connection:
+                    row = self._connection.execute(
+                        "SELECT payload FROM qa_evidence_artifacts WHERE evidence_ref=?",
+                        (artifact["evidence_ref"],),
+                    ).fetchone()
+                    if row is not None:
+                        if row["payload"] != payload:
+                            raise StorageError("Evidence reference is already bound to different content.")
+                        return
+                    self._connection.execute(
+                        "INSERT INTO qa_evidence_artifacts "
+                        "(evidence_ref, kind, content_sha256, size_bytes, created_at, payload) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (artifact["evidence_ref"], artifact["kind"], artifact["content_sha256"],
+                         size, created_at, payload),
+                    )
+            except sqlite3.Error as exc:
+                raise StorageError("Could not persist QA evidence artifact.") from exc
+
+    def get_qa_evidence_artifact(self, evidence_ref: str) -> dict | None:
+        if not isinstance(evidence_ref, str) or not evidence_ref:
+            raise StorageError("Evidence reference is required.")
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM qa_evidence_artifacts WHERE evidence_ref=?",
+                (evidence_ref,),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            payload = json.loads(row["payload"])
+            if payload.get("version") != 1:
+                raise ValueError("Unsupported evidence artifact version.")
+            return {
+                "evidence_ref": payload["evidence_ref"], "kind": payload["kind"],
+                "content_sha256": payload["content_sha256"], "size_bytes": payload["size_bytes"],
+                "stdout": payload["stdout"], "stderr": payload["stderr"],
+            }
+        except (ValueError, KeyError, TypeError) as exc:
+            raise StorageError("Persisted QA evidence artifact is invalid.") from exc
+
+    def list_qa_evidence_artifacts(self, *, limit: int = 100) -> tuple[dict, ...]:
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+            raise StorageError("QA evidence list limit is invalid.")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM qa_evidence_artifacts ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(json.loads(row["payload"]) for row in rows)
 
     def close(self) -> None:
         with self._lock:
