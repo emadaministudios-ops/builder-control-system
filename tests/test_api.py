@@ -238,8 +238,7 @@ class BCSAPITests(unittest.TestCase):
         self.assertEqual(status_response.json()["job"]["state"], "completed")
 
 
-    def test_human_can_run_server_profiled_integration_qa(self):
-        from bcs.qa import QAReportBuilder
+    def test_human_can_enqueue_server_profiled_integration_qa(self):
         profile_json = (
             '{"python-unit":[{"check_id":"unit","name":"Python unit tests",'
             '"argv":["python","-m","unittest","discover","-s","tests"]}]}'
@@ -250,33 +249,43 @@ class BCSAPITests(unittest.TestCase):
             "BCS_QA_DOCKER_IMAGE": "bcs-qa:stable",
             "BCS_QA_ALLOWED_IMAGES": "bcs-qa:stable",
         }
+        class FakeJobs:
+            def __init__(self):
+                self.submitted = None
+            def start(self):
+                pass
+            def stop(self, timeout=5):
+                return True
+            def enqueue_workflow(self, job_type, task_ids, requested_by, *, metadata=None):
+                self.submitted = (job_type, tuple(task_ids), requested_by, metadata)
+                return {
+                    "job_id": "job-qa-test", "state": "queued",
+                    "job_type": job_type, "metadata": metadata,
+                }
+        jobs = FakeJobs()
         with patch.dict("os.environ", env, clear=False):
             app = create_app(
                 runtime=self.runtime, authenticator=self.client.app.state.bcs_authenticator,
-                git_manager=object(),
+                git_manager=object(), execution_job_service=jobs,
             )
-        builder = QAReportBuilder(
-            task_id="qa-task", qa_run_id="qa-run",
-            evidence_store=self.runtime.evidence_store,
-        )
-        builder.add_static_check(
-            check_id="source", name="Source review", passed=True,
-            details="Reviewed.", basis="Static-only test fixture.",
-        )
-        report = builder.build()
-        with patch.object(self.runtime, "run_integration_qa", return_value=report) as run_qa, \
-             patch.object(self.runtime, "integration_qa_history", return_value=[{"integration_id": "integration-a", "status": "not_assessed"}]):
-            client = TestClient(app)
-            response = client.post(
-                "/v1/integrations/integration-a/qa",
-                headers={"Authorization": f"Bearer {self.human_token}"},
-                json={"profile_id": "python-unit"},
-            )
-            self.assertEqual(response.status_code, 201)
-            self.assertEqual(response.json()["assessment"]["status"], "not_assessed")
-            check = run_qa.call_args.kwargs["checks"][0]
-            self.assertEqual(check.argv, ("python", "-m", "unittest", "discover", "-s", "tests"))
-            client.close()
+        integration = {
+            "integration_id": "integration-a", "status": "awaiting_qa",
+            "commit_sha": "a" * 40,
+        }
+        with patch.object(self.runtime, "integration_history", return_value=[integration]):
+            with TestClient(app) as client:
+                response = client.post(
+                    "/v1/integrations/integration-a/qa",
+                    headers={"Authorization": f"Bearer {self.human_token}"},
+                    json={"profile_id": "python-unit"},
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(response.json()["job"]["state"], "queued")
+                self.assertEqual(response.json()["status_url"], "/v1/execution-jobs/job-qa-test")
+        self.assertEqual(jobs.submitted[0], "integration_qa")
+        self.assertEqual(jobs.submitted[1], ("integration-a",))
+        self.assertEqual(jobs.submitted[3]["profile_id"], "python-unit")
+        self.assertEqual(jobs.submitted[3]["commit_sha"], "a" * 40)
 
     def test_worker_cannot_start_integration_qa_even_with_scope(self):
         with patch.dict("os.environ", {
