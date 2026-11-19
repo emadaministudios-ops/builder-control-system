@@ -208,6 +208,15 @@ class BCSAPITests(unittest.TestCase):
             self.assertEqual(hidden.status_code, 404)
 
 
+    def test_build_reports_missing_model_provider_as_service_unavailable(self):
+        response = self.client.post(
+            "/v1/builds",
+            headers={"Authorization": f"Bearer {self.human_token}"},
+            json={"objective": "Build a small app."},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("server-side provider credentials", response.json()["detail"])
+
     def test_human_can_submit_one_request_brain_build_job(self):
         class FakePlannerProvider:
             def complete(self, messages, **kwargs):
