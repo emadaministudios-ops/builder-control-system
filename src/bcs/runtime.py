@@ -761,6 +761,134 @@ class BCSRuntime:
             "Autonomous QA loop stopped without a verified result.",
         )
 
+
+    def execute_plan_with_qa(
+        self,
+        task_ids: tuple[str, ...] | list[str],
+        supervisor: QASupervisor,
+        *,
+        max_repair_rounds: int = 3,
+    ) -> list[dict]:
+        """Dispatch a dependency plan, then independently review and repair each task.
+
+        Source review is not executable test evidence. This bounded workflow
+        reports that distinction explicitly and never performs release promotion.
+        """
+        if not isinstance(supervisor, QASupervisor) and not callable(
+            getattr(supervisor, "review", None)
+        ):
+            raise TypeError("A trusted QA supervisor is required.")
+        if not isinstance(task_ids, (tuple, list)) or not 1 <= len(task_ids) <= 100:
+            raise ValueError("Provide between 1 and 100 task IDs.")
+        if len(set(task_ids)) != len(task_ids):
+            raise ValueError("Task IDs must be unique.")
+        if isinstance(max_repair_rounds, bool) or not isinstance(max_repair_rounds, int) or not 1 <= max_repair_rounds <= 5:
+            raise ValueError("max_repair_rounds must be between 1 and 5.")
+
+        dispatch = self.scheduler.dispatch_plan(task_ids)
+        outcomes = []
+        for outcome in dispatch.outcomes:
+            entry = {
+                "task_id": outcome.task_id,
+                "state": outcome.state.value,
+                "worker_id": outcome.worker_id,
+                "reason": outcome.reason[:2000],
+                "result": None if outcome.result is None else {
+                    "status": outcome.result.status.value,
+                    "summary": outcome.result.summary[:12000],
+                    "changed_files": list(outcome.result.changed_files)[:200],
+                    "evidence_refs": list(outcome.result.evidence_refs)[:200],
+                    "blockers": list(outcome.result.blockers)[:100],
+                },
+                "qa": {"status": "not_run", "reviews": 0, "repair_task_ids": [], "reason": ""},
+            }
+            if outcome.state is not TaskState.COMPLETED or outcome.result is None:
+                entry["qa"] = {
+                    "status": "blocked", "reviews": 0, "repair_task_ids": [],
+                    "reason": "Specialist execution did not complete; QA was not run.",
+                }
+                outcomes.append(entry)
+                continue
+
+            record = self.orchestrator.get_task(outcome.task_id)
+            if record is None:
+                entry["qa"] = {
+                    "status": "blocked", "reviews": 0, "repair_task_ids": [],
+                    "reason": "Task record disappeared before QA review.",
+                }
+                outcomes.append(entry)
+                continue
+
+            current_result = outcome.result
+            review_count = 0
+            repair_ids_all = []
+            qa_status = "repair_required"
+            qa_reason = ""
+            for repair_round in range(max_repair_rounds + 1):
+                review, report, snapshot, repair_ids = self.review_and_handoff(
+                    record.task, current_result, supervisor
+                )
+                review_count += 1
+                if report is None or snapshot is None or review.status.value == "blocked":
+                    qa_status = "blocked"
+                    qa_reason = review.summary
+                    break
+                repair_ids_all.extend(item for item in repair_ids if item not in repair_ids_all)
+                if snapshot.state is FeedbackState.VERIFIED:
+                    qa_status = "source_review_complete"
+                    qa_reason = (
+                        "Required independent source-review cycles completed. "
+                        "No executable tests were configured; this is not a test pass or release approval."
+                    )
+                    break
+                if snapshot.state is FeedbackState.VERIFY_AGAIN:
+                    qa_status = "review_again"
+                    continue
+                if snapshot.state in {FeedbackState.HUMAN_ATTENTION, FeedbackState.CYCLE_BUDGET_EXHAUSTED}:
+                    qa_status = "blocked"
+                    qa_reason = snapshot.cycles[-1].instruction if snapshot.cycles else "QA requires human attention."
+                    break
+                if snapshot.state is not FeedbackState.REPAIR_REQUIRED:
+                    qa_status = "blocked"
+                    qa_reason = "Feedback controller returned an unsupported state."
+                    break
+                if repair_round >= max_repair_rounds or not repair_ids:
+                    qa_status = "repair_required"
+                    qa_reason = "QA findings remain open or the repair-round limit was reached."
+                    break
+
+                repair_result = self.scheduler.dispatch_independent(repair_ids)
+                incomplete = [
+                    item for item in repair_result.outcomes
+                    if item.state is not TaskState.COMPLETED or item.result is None
+                ]
+                if incomplete:
+                    qa_status = "blocked"
+                    qa_reason = "A repair worker failed, was blocked, or was unavailable."
+                    break
+                summaries = [current_result.summary]
+                changed = list(current_result.changed_files)
+                evidence = list(current_result.evidence_refs)
+                for item in repair_result.outcomes:
+                    summaries.append(item.result.summary)
+                    changed.extend(item.result.changed_files)
+                    evidence.extend(item.result.evidence_refs)
+                current_result = WorkerResult(
+                    WorkerResultStatus.COMPLETED,
+                    "\n".join(summaries)[-12000:],
+                    tuple(dict.fromkeys(changed)),
+                    tuple(dict.fromkeys(evidence)),
+                )
+
+            entry["qa"] = {
+                "status": qa_status,
+                "reviews": review_count,
+                "repair_task_ids": repair_ids_all[:100],
+                "reason": qa_reason[:2000],
+            }
+            outcomes.append(entry)
+        return outcomes
+
     def create_git_integration_coordinator(self, manager, *, max_groups: int = 32) -> GitIntegrationCoordinator:
         """Create the guarded integration service for this runtime."""
         return GitIntegrationCoordinator(manager, max_groups=max_groups)
