@@ -9,6 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bcs.providers import (
     OpenAICompatibleProvider, ProviderConfig, ProviderError,
+    ProviderRegistry, provider_configs_from_environment,
 )
 
 
@@ -127,6 +128,39 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=FakeResponse(b"not-json")):
             with self.assertRaises(ProviderError):
                 provider.complete([{"role": "user", "content": "Hi"}])
+
+    def test_registry_requires_explicit_selection_when_empty(self):
+        registry = ProviderRegistry()
+        with self.assertRaises(ProviderError):
+            registry.complete([{"role": "user", "content": "Hi"}])
+
+    def test_registry_rejects_unknown_provider_without_fallback(self):
+        registry = ProviderRegistry()
+        registry.register(ProviderConfig(
+            "ollama", "http://localhost:11434/v1", "llama3.2"
+        ))
+        with self.assertRaises(ProviderError):
+            registry.complete(
+                [{"role": "user", "content": "Hi"}], provider_id="missing"
+            )
+
+    def test_environment_loads_both_local_and_cloud_provider_definitions(self):
+        values = {
+            "BCS_OLLAMA_MODEL": "llama3.2",
+            "BCS_CLOUD_MODEL": "cloud-model",
+            "BCS_CLOUD_BASE_URL": "https://api.example.com/v1",
+            "BCS_CLOUD_API_KEY_ENV": "MY_MODEL_KEY",
+        }
+        with patch.dict(os.environ, values, clear=True):
+            configs = provider_configs_from_environment()
+        self.assertEqual({item.provider_id for item in configs}, {"ollama", "cloud"})
+        cloud = next(item for item in configs if item.provider_id == "cloud")
+        self.assertEqual(cloud.api_key_env, "MY_MODEL_KEY")
+
+    def test_partial_cloud_configuration_is_rejected(self):
+        with patch.dict(os.environ, {"BCS_CLOUD_MODEL": "cloud-model"}, clear=True):
+            with self.assertRaises(ValueError):
+                provider_configs_from_environment()
 
     def test_http_error_does_not_leak_provider_body(self):
         import urllib.error
