@@ -13,6 +13,7 @@ from bcs.orchestrator import (
 )
 from bcs.qa_handoff import QAEscalation
 from bcs.storage import SQLiteOrchestrationStore, StorageError
+from bcs.consultation import ConsultationRecord
 
 
 class SQLiteOrchestrationStoreTests(unittest.TestCase):
@@ -106,6 +107,37 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             connection.close()
             with self.assertRaises(StorageError):
                 SQLiteOrchestrationStore(path)
+
+    def test_consultation_history_survives_close_and_reopen(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "bcs.sqlite3"
+            store = SQLiteOrchestrationStore(path)
+            expected = ConsultationRecord(
+                consultation_id="consult-1", task_id="task-1",
+                requesting_role="frontend-developer", should_consult=True,
+                specialist_role="architect", question="Where should this boundary live?",
+                reason="A design dependency exists.", advice="Use an adapter boundary.",
+                risks=("Extra abstraction",), next_steps=("Define the interface.",),
+                confidence="high", created_at=datetime(2026, 11, 19, 10, 0, tzinfo=timezone.utc),
+            )
+            store.save_consultation(expected)
+            store.close()
+            reopened = SQLiteOrchestrationStore(path)
+            self.assertEqual(reopened.list_consultations(), (expected,))
+            self.assertEqual(reopened.list_consultations("task-1"), (expected,))
+            self.assertEqual(reopened.list_consultations("missing"), ())
+            reopened.close()
+
+    def test_schema_v3_database_is_migrated_for_consultation_history(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "legacy.sqlite3"
+            connection = sqlite3.connect(path)
+            connection.execute("PRAGMA user_version = 3")
+            connection.close()
+            with SQLiteOrchestrationStore(path) as store:
+                version = store._connection.execute("PRAGMA user_version").fetchone()[0]
+                self.assertEqual(version, 4)
+                self.assertEqual(store.list_consultations(), ())
 
     def test_memory_database_supported(self):
         with SQLiteOrchestrationStore(":memory:") as store:
