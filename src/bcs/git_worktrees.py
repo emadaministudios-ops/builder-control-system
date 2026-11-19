@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import hashlib
+import json
 import re
 import subprocess
 import threading
@@ -71,12 +72,48 @@ class GitWorktreeManager:
         self.command_timeout = command_timeout
         self._records: dict[str, WorktreeRecord] = {}
         self._lock = threading.RLock()
+        self._manifest_path = self.worktree_root / ".bcs-workspaces.json"
 
         top = self._run(["rev-parse", "--show-toplevel"]).stdout.strip()
         if Path(top).resolve() != self.repository_root:
             raise GitWorktreeError("Configured repository root is not the Git working-tree root.")
         self._run(["check-ref-format", "--branch", self.base_ref])
         self._run(["show-ref", "--verify", "--quiet", f"refs/heads/{self.base_ref}"])
+        self._restore_records()
+
+    def _restore_records(self) -> None:
+        """Recover manager-owned worktrees after an API restart from a durable manifest."""
+        if not self._manifest_path.exists():
+            return
+        try:
+            data = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise GitWorktreeError("Persistent worktree manifest is unreadable.") from exc
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("groups"), list):
+            raise GitWorktreeError("Persistent worktree manifest has an unsupported format.")
+        for group_id in data["groups"]:
+            group_id = self._identity(group_id)
+            branch, dirname = self._names(group_id)
+            path = (self.worktree_root / dirname).resolve(strict=False)
+            try:
+                path.relative_to(self.worktree_root)
+            except ValueError as exc:
+                raise GitWorktreeError("Persisted worktree path escaped its trusted root.") from exc
+            if not path.is_dir():
+                continue
+            actual_root = Path(self._run(["rev-parse", "--show-toplevel"], cwd=path).stdout.strip()).resolve()
+            actual_branch = self._run(["symbolic-ref", "--short", "HEAD"], cwd=path).stdout.strip()
+            if actual_root != path or actual_branch != branch:
+                raise GitWorktreeError("Persisted project worktree identity does not match its Git checkout.")
+            self._records[group_id] = WorktreeRecord(group_id, branch, path, self.base_ref)
+        self._persist_manifest()
+
+    def _persist_manifest(self) -> None:
+        """Atomically persist stable project IDs, not arbitrary filesystem paths."""
+        payload = {"version": 1, "groups": sorted(self._records)}
+        temporary = self._manifest_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        temporary.replace(self._manifest_path)
 
     def _run(self, args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess:
         try:
@@ -125,6 +162,7 @@ class GitWorktreeManager:
                 self._run(["worktree", "add", "-b", branch, str(path), self.base_ref])
                 existing = WorktreeRecord(group_id, branch, path.resolve(strict=True), self.base_ref)
                 self._records[group_id] = existing
+                self._persist_manifest()
             return Workspace(
                 workspace_id="workspace-" + hashlib.sha256(group_id.encode("utf-8")).hexdigest()[:20],
                 root=existing.path,
@@ -177,6 +215,7 @@ class GitWorktreeManager:
                 raise GitWorktreeError("Refusing to remove a dirty worktree; preserve its changes for review.")
             self._run(["worktree", "remove", str(record.path)])
             self._records.pop(group_id, None)
+            self._persist_manifest()
 
 
 __all__ = ["GitWorktreeError", "WorktreeRecord", "GitWorktreeManager"]
