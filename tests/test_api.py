@@ -219,7 +219,7 @@ class BCSAPITests(unittest.TestCase):
         response = self.client.post(
             "/v1/builds",
             headers={"Authorization": f"Bearer {self.human_token}"},
-            json={"objective": "Build a simple module."},
+            json={"objective": "Build a simple module.", "acceptance_criteria": ["The module is created."]},
         )
         self.assertEqual(response.status_code, 202)
         self.assertEqual(len(response.json()["task_ids"]), 1)
