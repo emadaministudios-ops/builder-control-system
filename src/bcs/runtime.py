@@ -19,7 +19,7 @@ from .sandbox_executor import DockerSandboxExecutor
 from .sandbox import SandboxLimits
 from .qa_supervisor import QAReview, QASupervisor, build_qa_report
 from .agents import ModelWorker
-from .consultation import SpecialistConsultant, SpecialistAdvice
+from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationRouter, ConsultationRoute)
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
 from .workspace_gateway import WorkspaceToolGateway
@@ -148,6 +148,36 @@ class BCSRuntime:
             question=question,
             context=context,
         )
+
+    def consult_for_task(
+        self, task_id: str, *, worker_summary: str,
+        blockers: tuple[str, ...] = (), provider_id: str | None = None,
+    ) -> tuple[ConsultationRoute, SpecialistAdvice | None]:
+        """Have BRAIN decide whether a task warrants one bounded specialist consult."""
+        record = self.orchestrator.get_task(task_id)
+        if record is None:
+            raise KeyError("Task does not exist.")
+        task = record.task
+        router = ConsultationRouter(providers=self.providers, provider_id=provider_id)
+        route = router.route(
+            task_role=task.role, objective=task.objective,
+            acceptance_criteria=task.acceptance_criteria,
+            worker_summary=worker_summary, blockers=blockers,
+        )
+        if not route.should_consult:
+            return route, None
+        advice = self.consult_specialist(
+            requesting_role=task.role, specialist_role=route.specialist_role,
+            objective=task.objective, question=route.question,
+            context=(
+                "Acceptance criteria: " + "; ".join(task.acceptance_criteria)
+                + "\\nWorker summary: " + worker_summary
+                + ("\\nBlockers: " + "; ".join(blockers) if blockers else "")
+                + "\\nBRAIN routing rationale: " + route.reason
+            ),
+            provider_id=provider_id,
+        )
+        return route, advice
 
     def apply_qa_review(self, review: QAReview):
         """Persist QA feedback and enqueue deterministic repair handoffs."""
