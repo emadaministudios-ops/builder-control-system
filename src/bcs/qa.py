@@ -34,11 +34,14 @@ class EvidenceArtifact:
 class EvidenceStore:
     """Thread-safe in-memory evidence store; replace with durable object storage later."""
 
-    def __init__(self, max_artifact_bytes: int = 200_000) -> None:
+    def __init__(self, max_artifact_bytes: int = 200_000, *, repository=None) -> None:
         if max_artifact_bytes < 1:
             raise ValueError("Evidence size limit must be positive.")
         self._max_bytes = max_artifact_bytes
         self._items: dict[str, EvidenceArtifact] = {}
+        self._repository = repository
+        if repository is not None and not callable(getattr(repository, "save_qa_evidence_artifact", None)):
+            raise TypeError("Evidence repository does not implement durable QA evidence storage.")
         self._lock = threading.RLock()
 
     def put_execution(self, stdout: str, stderr: str) -> str:
@@ -55,12 +58,41 @@ class EvidenceStore:
             stdout=stdout, stderr=stderr,
         )
         with self._lock:
+            if self._repository is not None:
+                self._repository.save_qa_evidence_artifact({
+                    "evidence_ref": artifact.evidence_ref,
+                    "kind": artifact.kind,
+                    "content_sha256": artifact.content_sha256,
+                    "size_bytes": artifact.size_bytes,
+                    "stdout": artifact.stdout,
+                    "stderr": artifact.stderr,
+                })
             self._items[ref] = artifact
         return ref
 
     def get(self, evidence_ref: str) -> EvidenceArtifact | None:
         with self._lock:
-            return self._items.get(evidence_ref)
+            cached = self._items.get(evidence_ref)
+            if cached is not None:
+                return cached
+            if self._repository is None:
+                return None
+            record = self._repository.get_qa_evidence_artifact(evidence_ref)
+            if record is None:
+                return None
+            artifact = EvidenceArtifact(
+                evidence_ref=record["evidence_ref"],
+                kind=record["kind"],
+                content_sha256=record["content_sha256"],
+                size_bytes=record["size_bytes"],
+                stdout=record["stdout"],
+                stderr=record["stderr"],
+            )
+            raw = (artifact.stdout + "\n--- STDERR ---\n" + artifact.stderr).encode("utf-8")
+            if len(raw) != artifact.size_bytes or hashlib.sha256(raw).hexdigest() != artifact.content_sha256:
+                raise ValueError("Persisted QA evidence failed integrity verification.")
+            self._items[evidence_ref] = artifact
+            return artifact
 
 
 @dataclass(frozen=True)
