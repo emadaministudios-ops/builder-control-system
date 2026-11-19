@@ -1,4 +1,5 @@
 import sys
+import json
 import unittest
 from pathlib import Path
 from datetime import datetime, timezone
@@ -82,6 +83,39 @@ class OrchestratorTests(unittest.TestCase):
         completed = o.dispatch(second.task.task_id)
         self.assertEqual(completed.state, TaskState.COMPLETED)
         self.assertEqual(seen, ["first", "second"])
+
+    def test_dependent_worker_receives_verified_prerequisite_outputs(self):
+        o = Orchestrator()
+        o.create_task(
+            task_id="design", objective="Design API", role="architect",
+            acceptance_criteria=["API contract is ready."],
+        )
+        o.create_task(
+            task_id="build", objective="Build API", role="backend-developer",
+            acceptance_criteria=["API works."], dependency_ids=["design"],
+        )
+        received = []
+        o.register_worker(
+            worker_id="architect", role="architect",
+            handler=lambda task: WorkerResult(
+                WorkerResultStatus.COMPLETED, "Use REST with JSON.",
+                ("docs/api-contract.md",), ("evidence:contract",),
+            ),
+        )
+        o.register_worker(
+            worker_id="backend", role="backend-developer",
+            handler=lambda task: (
+                received.extend(task.dependency_context)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "API built.")
+            ),
+        )
+        o.dispatch("design")
+        o.dispatch("build")
+        context = json.loads(received[0])
+        self.assertEqual(context["task_id"], "design")
+        self.assertEqual(context["summary"], "Use REST with JSON.")
+        self.assertEqual(context["changed_files"], ["docs/api-contract.md"])
+        self.assertEqual(context["evidence_refs"], ["evidence:contract"])
 
     def test_failed_prerequisite_keeps_dependent_task_queued(self):
         o = Orchestrator()
