@@ -109,7 +109,7 @@ class TaskPlanner:
                 or step_id in seen
             ):
                 raise PlanningError("Plan step IDs must be unique, lowercase identifiers.")
-            if role not in _ALLOWED_ROLES:
+            if not isinstance(role, str) or role not in _ALLOWED_ROLES:
                 raise PlanningError("Plan contains an unsupported specialist role.")
             if not isinstance(sub_objective, str) or not sub_objective.strip() or len(sub_objective) > 4000:
                 raise PlanningError("Each plan step needs a bounded, specific objective.")
@@ -124,6 +124,7 @@ class TaskPlanner:
             if (
                 not isinstance(dependencies, list)
                 or any(not isinstance(value, str) or not value for value in dependencies)
+                or any(not isinstance(value, str) for value in dependencies)
                 or len(set(dependencies)) != len(dependencies)
                 or step_id in dependencies
             ):
@@ -139,11 +140,11 @@ class TaskPlanner:
         plan_steps = tuple(steps)
         order = self._topological_order(plan_steps)
         # A plan must preserve the user-level acceptance criteria in its work.
-        combined = " ".join(
-            [objective, *criteria, *(step.objective for step in plan_steps),
+        planned_text = " ".join(
+            [*(step.objective for step in plan_steps),
              *(criterion for step in plan_steps for criterion in step.acceptance_criteria)]
         ).casefold()
-        missing = [criterion for criterion in criteria if criterion.casefold() not in combined]
+        missing = [criterion for criterion in criteria if criterion.casefold() not in planned_text]
         if missing:
             raise PlanningError("Plan omitted one or more original acceptance criteria.")
         return TaskPlan(objective, criteria, plan_steps, order)
