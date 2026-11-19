@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import threading
+import json
 from typing import Callable
 
 from .qa import QAReport
@@ -267,7 +268,7 @@ class Orchestrator:
             self._tasks = proposed
 
         dependency_context = tuple(
-            __import__("json").dumps(
+            json.dumps(
                 {
                     "task_id": dependency,
                     "objective": self._tasks[dependency].task.objective,
