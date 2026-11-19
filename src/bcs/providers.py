@@ -102,12 +102,22 @@ class OpenAICompatibleProvider:
         if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or not 1 <= max_tokens <= 32768:
             raise ValueError("max_tokens must be between 1 and 32768.")
 
-        payload = json.dumps({
+        payload_data = {
             "model": self.config.model,
             "messages": normalized,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        }
+        # Current OpenAI reasoning models reject sampling parameters such as
+        # temperature and use max_completion_tokens. Keep Ollama/other
+        # OpenAI-compatible providers on the conventional chat-completions shape.
+        if self.config.provider_id == "cloud" and self.config.model.startswith("gpt-6"):
+            payload_data["max_completion_tokens"] = max_tokens
+            payload_data["reasoning_effort"] = "low"
+        else:
+            payload_data["temperature"] = temperature
+            payload_data["max_tokens"] = max_tokens
+        payload = json.dumps(
+            payload_data, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
         url = self.config.base_url.rstrip("/") + "/chat/completions"
         headers = {"Content-Type": "application/json", "Accept": "application/json"}
         if self.config.api_key_env:
