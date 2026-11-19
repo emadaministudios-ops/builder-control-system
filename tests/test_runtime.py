@@ -14,6 +14,7 @@ from bcs.policy import ToolRequest
 from bcs.qa import EvidenceStore, QAReportBuilder
 from bcs.sandbox_executor import ExecutionResult
 from bcs.runtime import create_runtime
+from bcs.providers import ProviderConfig, ProviderError
 
 
 class RuntimeCompositionTests(unittest.TestCase):
@@ -75,6 +76,32 @@ class RuntimeCompositionTests(unittest.TestCase):
                     pass
             self.assertTrue(explicit_path.exists())
             self.assertFalse(env_path.exists())
+
+    def test_runtime_registers_explicit_local_and_cloud_providers(self):
+        configs = (
+            ProviderConfig("ollama", "http://127.0.0.1:11434/v1", "llama3.2"),
+            ProviderConfig(
+                "cloud", "https://api.example.com/v1", "cloud-model",
+                api_key_env="BCS_TEST_CLOUD_KEY",
+            ),
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            with create_runtime(
+                Path(folder) / "runtime.sqlite3",
+                provider_configs=configs,
+                default_provider_id="ollama",
+            ) as runtime:
+                self.assertEqual(runtime.providers.provider_ids(), ("cloud", "ollama"))
+                self.assertEqual(runtime.providers.default_provider_id, "ollama")
+
+    def test_runtime_rejects_unconfigured_default_provider(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaises(ValueError):
+                create_runtime(
+                    Path(folder) / "runtime.sqlite3",
+                    provider_configs=(),
+                    default_provider_id="cloud",
+                )
 
     def test_invalid_approval_ttl_is_rejected(self):
         with self.assertRaises(ValueError):
