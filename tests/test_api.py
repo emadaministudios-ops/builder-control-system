@@ -86,12 +86,7 @@ class BCSAPITests(unittest.TestCase):
         human_response = self.client.post(
             "/v1/approvals/approval-1/decision",
             headers={"Authorization": f"Bearer {self.human_token}"},
-            json={
-                "approved": True,
-                "reason": "Owner review",
-                "actor_id": "forged-owner",
-                "actor_type": "human",
-            },
+            json={"approved": True, "reason": "Owner review"},
         )
         self.assertEqual(human_response.status_code, 200)
         self.assertEqual(human_response.json()["approval"]["decided_by"], "owner-configured")
