@@ -156,8 +156,11 @@ class RuntimeGitIntegrationTests(unittest.TestCase):
             details="No source issue found.", basis="Static inspection only.",
         )
         report = builder.build()
-        with self.assertRaises(ValueError):
-            self.runtime._attach_qa_report_to_integration(integration.integration_id, report)
+        assessment = self.runtime._attach_qa_report_to_integration(
+            integration.integration_id, report
+        )
+        self.assertEqual("not_assessed", assessment["status"])
+        self.assertEqual(0, assessment["executed_check_count"])
 
     def test_integration_qa_refuses_changed_checkout_head(self):
         _, integration = self._completed_integration("changed-task", "changed-integration")
