@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from bcs.api import create_app, _git_manager_from_environment
 from bcs.approvals import ActorType
+from bcs.orchestrator import WorkerResult, WorkerResultStatus
 from bcs.auth import Principal, TokenAuthenticator
 from bcs.policy import ToolRequest, OperatingMode
 from bcs.providers import ProviderResponse
@@ -194,6 +195,47 @@ class BCSAPITests(unittest.TestCase):
                 headers={"Authorization": "Bearer other-owner-token"},
             )
             self.assertEqual(hidden.status_code, 404)
+
+
+    def test_human_can_submit_one_request_brain_build_job(self):
+        class FakePlannerProvider:
+            def complete(self, messages, **kwargs):
+                return ProviderResponse(
+                    "fake", "fake-model",
+                    '{"steps":[{"step_id":"build","role":"builder",'
+                    '"objective":"Build the requested module.",'
+                    '"acceptance_criteria":["The module is created."],'
+                    '"depends_on":[]}]}',
+                )
+
+        self.runtime.planner.providers = FakePlannerProvider()
+        self.runtime.orchestrator.register_worker(
+            worker_id="one-request-builder", role="builder",
+            handler=lambda task: WorkerResult(
+                WorkerResultStatus.COMPLETED, "Built the requested module.",
+                changed_files=("module.py",),
+            ),
+        )
+        response = self.client.post(
+            "/v1/builds",
+            headers={"Authorization": f"Bearer {self.human_token}"},
+            json={"objective": "Build a simple module."},
+        )
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(len(response.json()["task_ids"]), 1)
+        job_id = response.json()["job"]["job_id"]
+        deadline = time.monotonic() + 5
+        status_response = self.client.get(
+            f"/v1/execution-jobs/{job_id}",
+            headers={"Authorization": f"Bearer {self.human_token}"},
+        )
+        while status_response.status_code == 200 and status_response.json()["job"]["state"] in {"queued", "running"} and time.monotonic() < deadline:
+            time.sleep(0.05)
+            status_response = self.client.get(
+                f"/v1/execution-jobs/{job_id}",
+                headers={"Authorization": f"Bearer {self.human_token}"},
+            )
+        self.assertEqual(status_response.json()["job"]["state"], "completed")
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
