@@ -5,7 +5,7 @@ lifecycle. It does not start an HTTP server or connect model providers yet.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone, timedelta
 from uuid import uuid4
 import os
@@ -23,6 +23,7 @@ from .consultation import (SpecialistConsultant, SpecialistAdvice, ConsultationR
 from .consultation_feedback import ConsultationOutcome
 from .policy import OperatingMode, PolicyContext
 from .workspace import Workspace
+from .workspace_leases import WorkspaceLeaseManager
 from .workspace_gateway import WorkspaceToolGateway
 from .scheduler import TaskScheduler
 from .planner import TaskPlanner
@@ -54,6 +55,7 @@ class BCSRuntime:
     scheduler: TaskScheduler
     evidence_store: EvidenceStore
     planner: TaskPlanner
+    workspace_leases: WorkspaceLeaseManager = field(default_factory=WorkspaceLeaseManager)
 
     def plan_and_create_tasks(
         self,
@@ -167,15 +169,21 @@ class BCSRuntime:
             return consultation_cache[task.task_id]
 
         def worker_handler(task: WorkerTask) -> WorkerResult:
-            result = worker(task)
-            consultation_id = consultation_ids.get(task.task_id)
-            if consultation_id is not None:
-                self.record_consultation_outcome(
-                    consultation_id=consultation_id,
-                    disposition=result.consultation_disposition,
-                    worker_reason=result.consultation_reason,
-                )
-            return result
+            # Factories may deliberately map multiple tasks to one checkout.
+            # Serialize those tasks; distinct worktree roots still run in parallel.
+            lease_workspace = workspace_factory(task)
+            if not isinstance(lease_workspace, Workspace):
+                raise TypeError("Workspace factory must return a trusted Workspace.")
+            with self.workspace_leases.lease(lease_workspace.root):
+                result = worker(task)
+                consultation_id = consultation_ids.get(task.task_id)
+                if consultation_id is not None:
+                    self.record_consultation_outcome(
+                        consultation_id=consultation_id,
+                        disposition=result.consultation_disposition,
+                        worker_reason=result.consultation_reason,
+                    )
+                return result
 
         worker = ModelWorker(
             worker_id=worker_id,
