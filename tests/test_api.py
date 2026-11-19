@@ -22,7 +22,7 @@ class BCSAPITests(unittest.TestCase):
         self.worker_token = "worker-test-secret"
         self.human = Principal(
             "owner-configured", ActorType.HUMAN,
-            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide"}),
+            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote"}),
         )
         self.worker = Principal(
             "worker-configured", ActorType.WORKER,
@@ -111,6 +111,27 @@ class BCSAPITests(unittest.TestCase):
         )
         self.assertEqual(human_response.status_code, 200)
         self.assertEqual(human_response.json()["approval"]["decided_by"], "owner-configured")
+
+    def test_integration_history_requires_authentication_and_scope(self):
+        missing = self.client.get("/v1/integrations")
+        self.assertEqual(missing.status_code, 401)
+        allowed = self.client.get(
+            "/v1/integrations", headers={"Authorization": f"Bearer {self.human_token}"}
+        )
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(allowed.json(), {"integrations": []})
+
+    def test_promotion_api_requires_human_and_trusted_server_git_manager(self):
+        worker = self.client.post(
+            "/v1/integrations/example/promotion-requests",
+            headers={"Authorization": f"Bearer {self.worker_token}"},
+        )
+        self.assertEqual(worker.status_code, 403)
+        human_without_manager = self.client.post(
+            "/v1/integrations/example/promotion-requests",
+            headers={"Authorization": f"Bearer {self.human_token}"},
+        )
+        self.assertEqual(human_without_manager.status_code, 503)
 
     def test_decision_body_rejects_unrecognized_fields(self):
         response = self.client.post(
