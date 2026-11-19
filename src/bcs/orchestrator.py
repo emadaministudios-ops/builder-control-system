@@ -38,6 +38,8 @@ class WorkerResult:
     changed_files: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
+    consultation_disposition: str = "unknown"
+    consultation_reason: str = ""
 
 
 @dataclass(frozen=True)
