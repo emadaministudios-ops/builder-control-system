@@ -907,6 +907,196 @@ class SQLiteOrchestrationStore:
             ).fetchall()
         return tuple(self._decode_escalation(row["payload"]) for row in rows)
 
+
+    @staticmethod
+    def _decode_execution_job(payload: str) -> dict:
+        try:
+            data = json.loads(payload)
+            if not isinstance(data, dict) or data.get("version") != 1:
+                raise ValueError("Unsupported execution job record.")
+            for key in ("created_at", "updated_at"):
+                stamp = datetime.fromisoformat(data[key])
+                if stamp.tzinfo is None:
+                    raise ValueError("Naive job timestamp.")
+            if not isinstance(data["task_ids"], list) or not data["task_ids"]:
+                raise ValueError("Invalid task list.")
+            return {
+                "job_id": data["job_id"], "requested_by": data["requested_by"],
+                "state": data["state"], "task_ids": tuple(data["task_ids"]),
+                "created_at": data["created_at"], "updated_at": data["updated_at"],
+                "attempt": data["attempt"], "lease_owner": data.get("lease_owner"),
+                "lease_expires_at": data.get("lease_expires_at"),
+                "outcomes": data.get("outcomes", []), "error": data.get("error"),
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise StorageError("Stored execution job is invalid.") from exc
+
+    def enqueue_execution_job(self, *, job_id: str, task_ids, requested_by: str,
+                              now: datetime) -> dict:
+        ids = tuple(task_ids)
+        if not isinstance(job_id, str) or not job_id or len(job_id) > 128:
+            raise StorageError("Execution job ID is invalid.")
+        if not isinstance(requested_by, str) or not requested_by or len(requested_by) > 256:
+            raise StorageError("Execution job owner is invalid.")
+        if not 1 <= len(ids) <= 100 or len(set(ids)) != len(ids) or any(
+            not isinstance(item, str) or not item or len(item) > 256 for item in ids
+        ):
+            raise StorageError("Execution job task IDs are invalid.")
+        timestamp = self._timestamp(now)
+        data = {
+            "version": 1, "job_id": job_id, "requested_by": requested_by,
+            "state": "queued", "task_ids": list(ids), "created_at": timestamp,
+            "updated_at": timestamp, "attempt": 0, "lease_owner": None,
+            "lease_expires_at": None, "outcomes": [], "error": None,
+        }
+        encoded = self._json(data)
+        if len(encoded.encode("utf-8")) > 65536:
+            raise StorageError("Execution job payload exceeds the storage limit.")
+        with self._lock:
+            try:
+                with self._connection:
+                    self._connection.execute("""
+                        INSERT INTO execution_jobs
+                            (job_id, requested_by, state, created_at, updated_at,
+                             lease_owner, lease_expires_at, attempt, payload)
+                        VALUES (?, ?, 'queued', ?, ?, NULL, NULL, 0, ?)
+                    """, (job_id, requested_by, timestamp, timestamp, encoded))
+            except sqlite3.IntegrityError:
+                existing = self.get_execution_job(job_id)
+                if existing is None or existing["requested_by"] != requested_by or existing["task_ids"] != ids:
+                    raise StorageError("Execution job ID conflicts with an existing job.")
+                return existing
+            except sqlite3.Error as exc:
+                raise StorageError("Could not enqueue execution job.") from exc
+        return self.get_execution_job(job_id)
+
+    def claim_next_execution_job(self, *, worker_id: str, now: datetime,
+                                 lease_seconds: int) -> dict | None:
+        from datetime import timedelta
+        if not isinstance(worker_id, str) or not worker_id or len(worker_id) > 256:
+            raise StorageError("Execution worker identity is invalid.")
+        if not isinstance(lease_seconds, int) or not 15 <= lease_seconds <= 86400:
+            raise StorageError("Execution lease duration is invalid.")
+        timestamp = self._timestamp(now)
+        expires = self._timestamp(now + timedelta(seconds=lease_seconds))
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute("""
+                    SELECT payload, attempt FROM execution_jobs
+                    WHERE state='queued' OR (state='running' AND lease_expires_at < ?)
+                    ORDER BY created_at, job_id LIMIT 1
+                """, (timestamp,)).fetchone()
+                if row is None:
+                    self._connection.commit()
+                    return None
+                data = json.loads(row["payload"])
+                attempt = int(row["attempt"]) + 1
+                data.update({"state": "running", "attempt": attempt,
+                             "lease_owner": worker_id, "lease_expires_at": expires,
+                             "updated_at": timestamp, "error": None})
+                encoded = self._json(data)
+                self._connection.execute("""
+                    UPDATE execution_jobs SET state='running', updated_at=?,
+                        lease_owner=?, lease_expires_at=?, attempt=?, payload=?
+                    WHERE job_id=?
+                """, (timestamp, worker_id, expires, attempt, encoded, data["job_id"]))
+                self._connection.commit()
+                return self._decode_execution_job(encoded)
+            except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+                self._connection.rollback()
+                raise StorageError("Could not claim execution job.") from exc
+
+    def heartbeat_execution_job(self, *, job_id: str, worker_id: str, attempt: int,
+                                now: datetime, lease_seconds: int) -> bool:
+        from datetime import timedelta
+        timestamp = self._timestamp(now)
+        expires = self._timestamp(now + timedelta(seconds=lease_seconds))
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT payload FROM execution_jobs WHERE job_id=? AND state='running' AND lease_owner=? AND attempt=?",
+                    (job_id, worker_id, attempt),
+                ).fetchone()
+                if row is None:
+                    self._connection.commit()
+                    return False
+                data = json.loads(row["payload"])
+                data.update({"updated_at": timestamp, "lease_expires_at": expires})
+                self._connection.execute("""
+                    UPDATE execution_jobs SET updated_at=?, lease_expires_at=?, payload=?
+                    WHERE job_id=? AND state='running' AND lease_owner=? AND attempt=?
+                """, (timestamp, expires, self._json(data), job_id, worker_id, attempt))
+                self._connection.commit()
+                return True
+            except (sqlite3.Error, ValueError, TypeError) as exc:
+                self._connection.rollback()
+                raise StorageError("Could not renew execution job lease.") from exc
+
+    def _finish_execution_job(self, *, job_id: str, worker_id: str, attempt: int,
+                              state: str, now: datetime, outcomes=None, error=None) -> bool:
+        if state not in {"completed", "partial", "failed"}:
+            raise StorageError("Execution job terminal state is invalid.")
+        timestamp = self._timestamp(now)
+        with self._lock:
+            try:
+                self._connection.execute("BEGIN IMMEDIATE")
+                row = self._connection.execute(
+                    "SELECT payload FROM execution_jobs WHERE job_id=? AND state='running' AND lease_owner=? AND attempt=?",
+                    (job_id, worker_id, attempt),
+                ).fetchone()
+                if row is None:
+                    self._connection.commit()
+                    return False
+                data = json.loads(row["payload"])
+                data.update({"state": state, "updated_at": timestamp,
+                             "lease_owner": None, "lease_expires_at": None,
+                             "outcomes": outcomes or [], "error": error})
+                self._connection.execute("""
+                    UPDATE execution_jobs SET state=?, updated_at=?, lease_owner=NULL,
+                        lease_expires_at=NULL, payload=?
+                    WHERE job_id=? AND state='running' AND lease_owner=? AND attempt=?
+                """, (state, timestamp, self._json(data), job_id, worker_id, attempt))
+                self._connection.commit()
+                return True
+            except (sqlite3.Error, ValueError, TypeError) as exc:
+                self._connection.rollback()
+                raise StorageError("Could not finish execution job.") from exc
+
+    def complete_execution_job(self, *, job_id: str, worker_id: str, attempt: int,
+                               state: str, outcomes, now: datetime) -> bool:
+        return self._finish_execution_job(
+            job_id=job_id, worker_id=worker_id, attempt=attempt, state=state,
+            outcomes=outcomes, now=now,
+        )
+
+    def fail_execution_job(self, *, job_id: str, worker_id: str, attempt: int,
+                           error: str, now: datetime) -> bool:
+        if not isinstance(error, str) or len(error) > 2000:
+            raise StorageError("Execution job error summary is invalid.")
+        return self._finish_execution_job(
+            job_id=job_id, worker_id=worker_id, attempt=attempt, state="failed",
+            error=error, now=now,
+        )
+
+    def get_execution_job(self, job_id: str) -> dict | None:
+        with self._lock:
+            row = self._connection.execute(
+                "SELECT payload FROM execution_jobs WHERE job_id=?", (job_id,)
+            ).fetchone()
+        return None if row is None else self._decode_execution_job(row["payload"])
+
+    def list_execution_jobs(self, *, requested_by: str, limit: int = 100) -> tuple[dict, ...]:
+        if not isinstance(limit, int) or not 1 <= limit <= 500:
+            raise StorageError("Execution job list limit is invalid.")
+        with self._lock:
+            rows = self._connection.execute("""
+                SELECT payload FROM execution_jobs WHERE requested_by=?
+                ORDER BY created_at DESC, job_id DESC LIMIT ?
+            """, (requested_by, limit)).fetchall()
+        return tuple(self._decode_execution_job(row["payload"]) for row in rows)
+
     def close(self) -> None:
         with self._lock:
             self._connection.close()
