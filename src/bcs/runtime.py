@@ -827,6 +827,137 @@ class BCSRuntime:
         })
         return result
 
+
+    def run_integration_qa(
+        self,
+        *,
+        manager,
+        integration_id: str,
+        checks: tuple[QACheckSpec, ...] | list[QACheckSpec],
+        docker_executable: str,
+        image: str,
+        allowed_images: frozenset[str],
+        mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        worker_id: str = "integration-qa",
+        limits: SandboxLimits = SandboxLimits(),
+    ) -> QAReport:
+        """Execute checks in the immutable integration checkout and attach evidence."""
+        if not isinstance(integration_id, str) or not integration_id.strip():
+            raise ValueError("Integration ID is required.")
+        integration = next(
+            (item for item in self.store.list_integration_runs()
+             if item["integration_id"] == integration_id),
+            None,
+        )
+        if integration is None:
+            raise KeyError("Integration does not exist.")
+        if integration["status"] != "awaiting_qa":
+            raise ValueError("Only a successfully integrated checkout can enter QA.")
+        from .git_worktrees import GitWorktreeError, GitWorktreeManager
+        if not isinstance(manager, GitWorktreeManager):
+            raise TypeError("A trusted GitWorktreeManager is required.")
+        checkout = Path(integration["path"]).resolve(strict=True)
+        trusted_root = manager.worktree_root.resolve(strict=True)
+        try:
+            checkout.relative_to(trusted_root)
+        except ValueError as exc:
+            raise ValueError("Integration checkout is outside the trusted worktree root.") from exc
+        head_before = manager._run(["rev-parse", "HEAD"], cwd=checkout).stdout.strip()
+        if head_before != integration["commit_sha"]:
+            raise ValueError("Integration checkout HEAD no longer matches its recorded commit.")
+        groups = set(integration["included_groups"])
+        task_record = next(
+            (item for item in self.orchestrator.snapshot().tasks
+             if item.task.workspace_group_id in groups),
+            None,
+        )
+        if task_record is None:
+            raise ValueError("No persisted task is available to anchor integration QA.")
+        task = task_record.task
+        workspace_id = "integration-" + integration_id[:160]
+        def workspace_factory(_task):
+            return Workspace(workspace_id=workspace_id, root=checkout)
+        report = self.run_executable_qa(
+            task, checks,
+            workspace_factory=workspace_factory,
+            docker_executable=docker_executable,
+            image=image,
+            allowed_images=allowed_images,
+            mode=mode,
+            worker_id=worker_id,
+            limits=limits,
+        )
+        head_after = manager._run(["rev-parse", "HEAD"], cwd=checkout).stdout.strip()
+        if head_after != head_before:
+            raise GitWorktreeError("Integration HEAD changed during QA; report was not attached.")
+        tracked_changes = manager._run(
+            ["status", "--porcelain", "--untracked-files=no"], cwd=checkout
+        ).stdout.strip()
+        if tracked_changes:
+            raise GitWorktreeError(
+                "QA modified tracked integration files; report was not attached."
+            )
+        self.attach_qa_report_to_integration(integration_id, report)
+        return report
+
+    def attach_qa_report_to_integration(self, integration_id: str, report: QAReport):
+        """Attach a validated report to an integration's exact recorded commit."""
+        if not isinstance(report, QAReport):
+            raise TypeError("A validated QAReport is required.")
+        integration = next(
+            (item for item in self.store.list_integration_runs()
+             if item["integration_id"] == integration_id),
+            None,
+        )
+        if integration is None:
+            raise KeyError("Integration does not exist.")
+        if integration["status"] != "awaiting_qa":
+            raise ValueError("Integration is not eligible for QA assessment.")
+        groups = set(integration["included_groups"])
+        matching_tasks = [
+            item for item in self.orchestrator.snapshot().tasks
+            if item.task.workspace_group_id in groups
+        ]
+        if not matching_tasks or report.task_id not in {
+            item.task.task_id for item in matching_tasks
+        }:
+            raise ValueError("QA report task does not belong to this integration.")
+        executed_count = sum(1 for check in report.checks if check.executed)
+        status = report.status.value
+        if status == "passed" and executed_count == 0:
+            status = "not_assessed"
+        checks = tuple({
+            "check_id": check.check_id,
+            "status": check.status.value,
+            "executed": check.executed,
+            "command": None if check.command is None else list(check.command),
+            "exit_code": check.exit_code,
+            "evidence_ref": check.evidence_ref,
+            "details": check.details[:2000],
+            "non_execution_basis": check.non_execution_basis,
+        } for check in report.checks)
+        evidence_refs = tuple(dict.fromkeys(
+            check.evidence_ref for check in report.checks if check.evidence_ref
+        ))
+        record = {
+            "integration_id": integration_id,
+            "commit_sha": integration["commit_sha"],
+            "qa_run_id": report.qa_run_id,
+            "task_id": report.task_id,
+            "status": status,
+            "executed_check_count": executed_count,
+            "evidence_refs": evidence_refs,
+            "checks": checks,
+            "started_at": report.started_at.isoformat(),
+            "finished_at": report.finished_at.isoformat(),
+        }
+        self.store.save_integration_qa_assessment(record)
+        return record
+
+    def integration_qa_history(self, integration_id: str):
+        """Return append-only QA assessments for one integration."""
+        return self.store.list_integration_qa_assessments(integration_id)
+
     def integration_history(self):
         """Return durable integration records, including after runtime restart."""
         return self.store.list_integration_runs()
