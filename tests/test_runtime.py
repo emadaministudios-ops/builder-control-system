@@ -103,6 +103,33 @@ class RuntimeCompositionTests(unittest.TestCase):
                     default_provider_id="cloud",
                 )
 
+    def test_runtime_plans_and_persists_dependency_aware_tasks(self):
+        class FakePlannerProvider:
+            def complete(self, messages, **kwargs):
+                from bcs.providers import ProviderResponse
+                return ProviderResponse(
+                    "fake", "fake-model",
+                    '{"steps":['
+                    '{"step_id":"design","role":"architect","objective":"Design the API.",'
+                    '"acceptance_criteria":["API contract is ready."],"depends_on":[]},'
+                    '{"step_id":"build","role":"backend-developer","objective":"Build the API.",'
+                    '"acceptance_criteria":["API endpoint works."],"depends_on":["design"]}]}'
+                )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "planned.sqlite3"
+            runtime = create_runtime(path)
+            runtime.planner.providers = FakePlannerProvider()
+            try:
+                plan, records = runtime.plan_and_create_tasks("Build an API.")
+                self.assertEqual(plan.execution_order, ("design", "build"))
+                self.assertEqual(len(records), 2)
+                self.assertEqual(records[1].task.dependency_ids, (records[0].task.task_id,))
+            finally:
+                runtime.close()
+            with create_runtime(path) as reopened:
+                restored = reopened.orchestrator.get_task(records[1].task.task_id)
+                self.assertEqual(restored.task.dependency_ids, (records[0].task.task_id,))
+
     def test_invalid_approval_ttl_is_rejected(self):
         with self.assertRaises(ValueError):
             create_runtime(":memory:", approval_ttl_seconds=0)
