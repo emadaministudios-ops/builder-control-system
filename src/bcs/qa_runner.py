@@ -50,7 +50,7 @@ class QAExecutionRunner:
                 raise ValueError("QA check identity fields are required.")
             if isinstance(check.argv, (str, bytes)) or not check.argv:
                 raise ValueError("QA check command must be a non-empty argument vector.")
-            if any(not isinstance(part, str) or not part or "\\x00" in part for part in check.argv):
+            if any(not isinstance(part, str) or not part or "\x00" in part for part in check.argv):
                 raise ValueError("QA check command arguments must be non-empty NUL-free strings.")
             result = self._executor.execute(check.request_id, check.argv, now=now)
             builder.add_execution(
