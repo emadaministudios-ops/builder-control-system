@@ -22,7 +22,7 @@ result = runtime.scheduler.dispatch_plan(
 
 The scheduler executes dependency-ready waves, parallelizing independent tasks up to the configured concurrency ceiling. The orchestrator independently checks prerequisites at dispatch time, so a direct dispatch call cannot bypass the dependency gate. If a prerequisite fails, is blocked, or has no available worker, its dependants remain queued rather than being treated as complete. When a prerequisite completes, BCS passes its verified task ID, objective, specialist role, result summary, changed-file list and evidence references into the dependent worker's task context. This gives downstream agents the actual outputs they need instead of asking them to rediscover prior work.
 
-The scheduler does not yet infer file-level conflicts or automatically allocate separate Git worktrees. The trusted workspace factory remains responsible for ensuring concurrently executing tasks do not mutate the same workspace.
+The scheduler does not yet infer file-level conflicts or automatically allocate separate Git worktrees. The trusted workspace factory remains responsible for ensuring concurrently executing tasks do not mutate the same workspace. Each task also carries a stable `workspace_group_id`; QA-created repair tasks inherit the original task's group. A production workspace factory must resolve that group to the same project checkout for repair/retest, while still isolating independent concurrent tasks in separate worktrees or branches.
 
 ## Model-backed specialist workers
 
