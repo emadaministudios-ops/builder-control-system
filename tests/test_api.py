@@ -1,6 +1,7 @@
 """HTTP API tests: authentication, scopes and approval identity boundaries."""
 import hashlib
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -12,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from bcs.api import create_app, _git_manager_from_environment
 from bcs.approvals import ActorType
 from bcs.auth import Principal, TokenAuthenticator
-from bcs.policy import ToolRequest
+from bcs.policy import ToolRequest, OperatingMode
+from bcs.providers import ProviderResponse
+from bcs.workspace import Workspace
 from bcs.runtime import create_runtime
 
 
@@ -23,7 +26,7 @@ class BCSAPITests(unittest.TestCase):
         self.worker_token = "worker-test-secret"
         self.human = Principal(
             "owner-configured", ActorType.HUMAN,
-            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote"}),
+            frozenset({"tasks:read", "tasks:create", "approvals:read", "approvals:decide", "integrations:read", "integrations:promote", "tasks:execute"}),
         )
         self.worker = Principal(
             "worker-configured", ActorType.WORKER,
@@ -133,6 +136,40 @@ class BCSAPITests(unittest.TestCase):
             headers={"Authorization": f"Bearer {self.human_token}"},
         )
         self.assertEqual(human_without_manager.status_code, 503)
+
+    def test_human_can_dispatch_model_worker_and_worker_cannot_start_execution(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self.runtime.providers.complete = lambda messages, **kwargs: ProviderResponse(
+                "test", "test-model",
+                '{"summary":"Created module","edits":[{"path":"module.py","content":"VALUE = 7\\n"}],"blockers":[]}',
+            )
+            self.runtime.register_model_worker(
+                worker_id="builder-api-test",
+                role="builder",
+                workspace_factory=lambda task: Workspace("workspace-api-test", root),
+                mode=OperatingMode.AUTONOMOUS,
+            )
+            created = self.client.post(
+                "/v1/tasks",
+                headers={"Authorization": f"Bearer {self.human_token}"},
+                json={"objective": "Create a module exposing VALUE."},
+            )
+            task_id = created.json()["task"]["task"]["task_id"]
+            denied = self.client.post(
+                "/v1/tasks/dispatch",
+                headers={"Authorization": f"Bearer {self.worker_token}"},
+                json={"task_ids": [task_id]},
+            )
+            self.assertEqual(denied.status_code, 403)
+            dispatched = self.client.post(
+                "/v1/tasks/dispatch",
+                headers={"Authorization": f"Bearer {self.human_token}"},
+                json={"task_ids": [task_id]},
+            )
+            self.assertEqual(dispatched.status_code, 200)
+            self.assertEqual(dispatched.json()["outcomes"][0]["state"], "completed")
+            self.assertEqual((root / "module.py").read_text(), "VALUE = 7\\n")
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
