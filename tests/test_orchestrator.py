@@ -55,6 +55,54 @@ class OrchestratorTests(unittest.TestCase):
         o.register_worker(worker_id="w1",role="frontend-developer",
             handler=lambda _:WorkerResult(WorkerResultStatus.COMPLETED,"done",("../outside",)))
         self.assertEqual(o.dispatch(tid).state,TaskState.FAILED)
+    def test_task_cannot_dispatch_before_prerequisite_completes(self):
+        o = Orchestrator()
+        first = o.create_task(
+            task_id="first", objective="Prepare contract",
+            acceptance_criteria=["Contract is ready."],
+        )
+        second = o.create_task(
+            task_id="second", objective="Implement against contract",
+            acceptance_criteria=["Implementation works."],
+            dependency_ids=["first"],
+        )
+        seen = []
+        o.register_worker(
+            worker_id="builder", role="builder",
+            handler=lambda task: (
+                seen.append(task.task_id)
+                or WorkerResult(WorkerResultStatus.COMPLETED, "done")
+            ),
+        )
+        blocked = o.dispatch(second.task.task_id)
+        self.assertEqual(blocked.state, TaskState.QUEUED)
+        self.assertIn("prerequisite", blocked.reason)
+        self.assertEqual(seen, [])
+        o.dispatch(first.task.task_id)
+        completed = o.dispatch(second.task.task_id)
+        self.assertEqual(completed.state, TaskState.COMPLETED)
+        self.assertEqual(seen, ["first", "second"])
+
+    def test_failed_prerequisite_keeps_dependent_task_queued(self):
+        o = Orchestrator()
+        o.create_task(
+            task_id="first", objective="Prepare contract",
+            acceptance_criteria=["Contract is ready."],
+        )
+        o.create_task(
+            task_id="second", objective="Implement",
+            acceptance_criteria=["Implementation works."],
+            dependency_ids=["first"],
+        )
+        o.register_worker(
+            worker_id="builder", role="builder",
+            handler=lambda task: WorkerResult(WorkerResultStatus.ERROR, "failed"),
+        )
+        o.dispatch("first")
+        outcome = o.dispatch("second")
+        self.assertEqual(outcome.state, TaskState.QUEUED)
+        self.assertIn("first", outcome.reason)
+
     def test_duplicate_report_ingestion_is_idempotent(self):
         o=Orchestrator(); report=self.report()
         self.assertEqual(o.ingest_qa_report(report),o.ingest_qa_report(report))
