@@ -1,0 +1,6 @@
+# Runtime and API dependencies. Core policy modules otherwise use Python stdlib.
+fastapi>=0.115.6,<1.0
+uvicorn>=0.34,<1.0
+
+# FastAPI TestClient dependency used by API tests.
+httpx>=0.28,<1.0
