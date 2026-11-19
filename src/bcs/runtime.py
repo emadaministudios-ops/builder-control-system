@@ -805,10 +805,25 @@ class BCSRuntime:
                 )
 
         coordinator = self.create_git_integration_coordinator(manager)
-        return coordinator.integrate(
+        result = coordinator.integrate(
             integration_id=integration_id,
             workspace_group_ids=workspace_group_ids,
         )
+        self.store.save_integration_run({
+            "integration_id": result.integration_id,
+            "branch": result.branch,
+            "path": str(result.path),
+            "status": result.status,
+            "included_groups": result.included_groups,
+            "commits": result.commits,
+            "conflicts": result.conflicts,
+            "reason": result.reason,
+        })
+        return result
+
+    def integration_history(self):
+        """Return durable integration records, including after runtime restart."""
+        return self.store.list_integration_runs()
 
     def close(self) -> None:
         self.store.close()
