@@ -222,19 +222,74 @@ def create_app(
     active_git_manager = git_manager if git_manager is not None else _git_manager_from_environment()
     registered_workers = _register_default_workers(active_runtime, active_git_manager)
     execution_handler = None
-    if active_git_manager is not None and active_runtime.providers.provider_ids():
+    if active_git_manager is not None:
+        provider_available = bool(active_runtime.providers.provider_ids())
         mode_name = os.environ.get("BCS_WORKER_MODE", "autonomous").strip().lower()
         try:
-            qa_mode = OperatingMode(mode_name)
+            worker_mode = OperatingMode(mode_name)
         except ValueError as exc:
             raise RuntimeError("BCS_WORKER_MODE must be supervised or autonomous.") from exc
-        qa_supervisor = active_runtime.create_qa_supervisor(
-            workspace_factory=active_git_manager.workspace_for_task,
-            mode=qa_mode,
+        qa_supervisor = (
+            active_runtime.create_qa_supervisor(
+                workspace_factory=active_git_manager.workspace_for_task,
+                mode=worker_mode,
+            ) if provider_available else None
         )
-        execution_handler = lambda job: active_runtime.execute_plan_with_qa(
-            job["task_ids"], qa_supervisor
-        )
+        def execute_background_workflow(job):
+            if job.get("job_type", "tasks") == "tasks":
+                if qa_supervisor is None:
+                    raise RuntimeError("No model provider is configured for task execution.")
+                return active_runtime.execute_plan_with_qa(job["task_ids"], qa_supervisor)
+            if job.get("job_type") != "integration_qa":
+                raise ValueError("Unsupported background workflow type.")
+            integration_id = job["metadata"].get("integration_id")
+            profile_id = job["metadata"].get("profile_id")
+            profiles = _qa_profiles_from_environment()
+            profile = profiles.get(profile_id)
+            image = os.environ.get("BCS_QA_DOCKER_IMAGE", "").strip()
+            allowed_images = frozenset(
+                item.strip() for item in os.environ.get("BCS_QA_ALLOWED_IMAGES", "").split(",")
+                if item.strip()
+            )
+            if not integration_id or not profile or not image or image not in allowed_images:
+                raise RuntimeError("The queued QA job no longer has a valid trusted configuration.")
+            from .qa_runner import QACheckSpec
+            checks = tuple(
+                QACheckSpec(
+                    check_id=item["check_id"], name=item["name"],
+                    request_id="qa-request-" + uuid4().hex, argv=item["argv"],
+                ) for item in profile
+            )
+            try:
+                mode = OperatingMode(os.environ.get(
+                    "BCS_QA_MODE", os.environ.get("BCS_WORKER_MODE", "autonomous")
+                ).strip().lower())
+            except ValueError as exc:
+                raise RuntimeError("BCS_QA_MODE must be supervised or autonomous.") from exc
+            report = active_runtime.run_integration_qa(
+                manager=active_git_manager, integration_id=integration_id,
+                checks=checks,
+                docker_executable=os.environ.get("BCS_DOCKER_EXECUTABLE", "docker"),
+                image=image, allowed_images=allowed_images, mode=mode,
+            )
+            history = active_runtime.integration_qa_history(integration_id)
+            if not history:
+                raise RuntimeError("QA finished without a durable integration assessment.")
+            assessment = history[-1]
+            return [{
+                "task_id": integration_id, "state": "completed",
+                "worker_id": "integration-qa", "reason": "",
+                "result": None,
+                "qa": {
+                    "status": assessment["status"],
+                    "commit_sha": assessment["commit_sha"],
+                    "qa_run_id": assessment["qa_run_id"],
+                    "executed_checks": assessment["executed_check_count"],
+                    "evidence_refs": assessment["evidence_refs"],
+                    "checks": assessment["checks"],
+                },
+            }]
+        execution_handler = execute_background_workflow
     active_job_service = execution_job_service or ExecutionJobService(
         active_runtime.store, active_runtime.scheduler,
         execution_handler=execution_handler,
@@ -536,59 +591,48 @@ def create_app(
         require_scope(principal, "integrations:read")
         return {"integrations": _json_value(active_runtime.integration_history())}
 
-    @app.post("/v1/integrations/{integration_id}/qa", status_code=status.HTTP_201_CREATED)
-    def execute_integration_qa(
+    @app.post("/v1/integrations/{integration_id}/qa", status_code=status.HTTP_202_ACCEPTED)
+    def enqueue_integration_qa(
         integration_id: str,
         payload: IntegrationQAInput,
         principal: Principal = Depends(require_principal),
     ):
         require_scope(principal, "qa:execute")
         if principal.actor_type.value != "human":
-            raise HTTPException(status_code=403, detail="Only an authenticated human may start integration QA.")
+            raise HTTPException(status_code=403, detail="Only an authenticated human may enqueue integration QA.")
         manager = app.state.bcs_git_manager
         if manager is None:
             raise HTTPException(status_code=503, detail="Trusted Git worktrees are not configured.")
-        profiles = app.state.bcs_qa_profiles
-        profile = profiles.get(payload.profile_id)
+        profile = app.state.bcs_qa_profiles.get(payload.profile_id)
         if profile is None:
             raise HTTPException(status_code=404, detail="QA profile not found or not configured.")
-        image = app.state.bcs_qa_docker_image
-        allowed_images = app.state.bcs_qa_allowed_images
-        if not image or image not in allowed_images:
+        if (not app.state.bcs_qa_docker_image
+            or app.state.bcs_qa_docker_image not in app.state.bcs_qa_allowed_images):
             raise HTTPException(status_code=503, detail="An allowlisted BCS QA Docker image is not configured.")
-        mode_name = app.state.bcs_qa_mode
-        try:
-            qa_mode = OperatingMode(mode_name)
-        except ValueError as exc:
-            raise HTTPException(status_code=503, detail="BCS_QA_MODE must be supervised or autonomous.") from exc
-        from .qa_runner import QACheckSpec
-        checks = tuple(
-            QACheckSpec(
-                check_id=item["check_id"],
-                name=item["name"],
-                request_id="qa-request-" + uuid4().hex,
-                argv=item["argv"],
-            )
-            for item in profile
+        integration = next(
+            (item for item in active_runtime.integration_history()
+             if item["integration_id"] == integration_id), None
         )
+        if integration is None:
+            raise HTTPException(status_code=404, detail="Integration not found.")
+        if integration["status"] != "awaiting_qa":
+            raise HTTPException(status_code=409, detail="Integration is not awaiting QA.")
         try:
-            report = active_runtime.run_integration_qa(
-                manager=manager,
-                integration_id=integration_id,
-                checks=checks,
-                docker_executable=app.state.bcs_docker_executable,
-                image=image,
-                allowed_images=allowed_images,
-                mode=qa_mode,
+            job = active_job_service.enqueue_workflow(
+                "integration_qa", (integration_id,), principal.actor_id,
+                metadata={
+                    "integration_id": integration_id,
+                    "profile_id": payload.profile_id,
+                    "commit_sha": integration["commit_sha"],
+                },
             )
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Integration not found.") from exc
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        history = active_runtime.integration_qa_history(integration_id)
-        if not history:
-            raise HTTPException(status_code=500, detail="QA completed without a persisted assessment.")
-        return {"assessment": _json_value(history[-1])}
+        return {
+            "job": _json_value(job),
+            "status_url": f"/v1/execution-jobs/{job['job_id']}",
+            "qa_history_url": f"/v1/integrations/{integration_id}/qa",
+        }
 
     @app.get("/v1/integrations/{integration_id}/qa")
     def list_integration_qa(
