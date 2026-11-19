@@ -76,6 +76,24 @@ class OpenAICompatibleProviderTests(unittest.TestCase):
         self.assertEqual(result.content, "Hello from model")
         self.assertEqual(result.provider_id, "ollama")
 
+    def test_gpt6_cloud_provider_uses_reasoning_compatible_parameters(self):
+        config = ProviderConfig(
+            "cloud", "https://api.openai.com/v1", "gpt-6.2-sol",
+            api_key_env="BCS_TEST_MODEL_KEY",
+        )
+        fake = FakeResponse(response_body())
+        with patch.dict(os.environ, {"BCS_TEST_MODEL_KEY": "test-secret"}):
+            with patch("urllib.request.urlopen", return_value=fake) as open_url:
+                OpenAICompatibleProvider(config).complete(
+                    [{"role": "user", "content": "Hi"}], max_tokens=256
+                )
+        request = open_url.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["max_completion_tokens"], 256)
+        self.assertEqual(payload["reasoning_effort"], "low")
+        self.assertNotIn("temperature", payload)
+        self.assertNotIn("max_tokens", payload)
+
     def test_cloud_provider_uses_environment_credential(self):
         config = ProviderConfig(
             "cloud", "https://api.example.com/v1", "cloud-model",
