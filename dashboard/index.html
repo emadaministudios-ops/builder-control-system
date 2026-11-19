@@ -31,7 +31,7 @@
       <section id="notice" class="notice hidden" role="status"></section>
       <section class="connect panel" id="connection-panel">
         <div><span class="eyebrow">SECURE CONNECTION</span><h2>Connect to your BCS control API</h2><p>Your bearer token stays in this browser tab and is never saved to the repository.</p></div>
-        <form id="connect-form"><label>API address<input id="api-url" type="url" placeholder="https://your-bcs-host" autocomplete="url"></label><label>Bearer token<input id="api-token" type="password" placeholder="Paste API token" autocomplete="off" required></label><button class="button primary" type="submit">Connect securely</button></form>
+        <form id="connect-form"><label>BCS API address<input id="api-url" type="url" placeholder="https://bcs-api-development.up.railway.app" autocomplete="url"></label><p class="item-meta">This must be your BCS server URL only. Never paste an OpenAI key into this field.</p><label>Bearer token<input id="api-token" type="password" placeholder="Paste API token" autocomplete="off" required></label><button class="button primary" type="submit">Connect securely</button></form><div class="item-meta" style="margin-top:14px"><strong>OpenAI model setup is separate.</strong> Add your replacement key in Railway → bcs-api → Variables as <code>OPENAI_API_KEY</code>. Do not enter it here; BCS reads it on the server. The API address above and your BCS bearer token are only for dashboard access.</div>
       </section>
       <section id="overview" class="stats">
         <article class="stat panel"><span>Tasks</span><strong id="stat-tasks">—</strong><small>Across this runtime</small></article>
