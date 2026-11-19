@@ -12,7 +12,11 @@ from pathlib import Path
 
 from .approvals import ApprovalService
 from .feedback import FeedbackController
-from .orchestrator import Orchestrator
+from .agents import ModelWorker
+from .policy import OperatingMode, PolicyContext
+from .workspace import Workspace
+from .workspace_gateway import WorkspaceToolGateway
+from .orchestrator import Orchestrator, WorkerTask
 from .providers import ProviderConfig, ProviderRegistry, provider_configs_from_environment
 from .storage import SQLiteOrchestrationStore
 
@@ -26,6 +30,57 @@ class BCSRuntime:
     approvals: ApprovalService
     feedback: FeedbackController
     providers: ProviderRegistry
+
+    def register_model_worker(
+        self,
+        *,
+        worker_id: str,
+        role: str,
+        workspace_factory,
+        mode: OperatingMode = OperatingMode.AUTONOMOUS,
+        capabilities: frozenset[str] = frozenset({"workspace.read", "workspace.edit"}),
+        provider_id: str | None = None,
+    ) -> ModelWorker:
+        """Register a model-backed specialist with a trusted workspace factory.
+
+        The factory is application-owned and must return the isolated workspace
+        assigned to the task. The worker never chooses its own workspace or grants.
+        """
+        if not callable(workspace_factory):
+            raise TypeError("A trusted workspace factory is required.")
+        if not isinstance(mode, OperatingMode):
+            raise TypeError("Operating mode must be an OperatingMode value.")
+        if not capabilities or any(not isinstance(item, str) for item in capabilities):
+            raise ValueError("At least one explicit worker capability is required.")
+
+        def gateway_factory(task: WorkerTask) -> WorkspaceToolGateway:
+            workspace = workspace_factory(task)
+            if not isinstance(workspace, Workspace):
+                raise TypeError("Workspace factory must return a trusted Workspace.")
+            context = PolicyContext(
+                mode=mode,
+                task_id=task.task_id,
+                worker_id=worker_id,
+                workspace_id=workspace.workspace_id,
+                expected_workspace_id=workspace.workspace_id,
+                task_active=True,
+                worker_active=True,
+                task_capabilities=frozenset(capabilities),
+                worker_capabilities=frozenset(capabilities),
+            )
+            return WorkspaceToolGateway(workspace, context, self.approvals)
+
+        worker = ModelWorker(
+            worker_id=worker_id,
+            role=role,
+            providers=self.providers,
+            gateway_factory=gateway_factory,
+            provider_id=provider_id,
+        )
+        self.orchestrator.register_worker(
+            worker_id=worker_id, role=role, handler=worker
+        )
+        return worker
 
     def close(self) -> None:
         self.store.close()
