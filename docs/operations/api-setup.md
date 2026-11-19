@@ -1,6 +1,6 @@
 # BCS API setup (development)
 
-The control API is a FastAPI application. It exposes health, top-level task intake, task status, approval decisions and QA feedback history.
+The control API is a FastAPI application. It exposes health, top-level task intake, task status, approval decisions, QA feedback, integration history and human-gated integration promotion controls.
 
 ## 1. Install dependencies
 
@@ -40,7 +40,9 @@ Configure `BCS_API_TOKEN_HASHES` as a JSON array. Example shape (replace the dig
       "tasks:read",
       "tasks:create",
       "approvals:read",
-      "approvals:decide"
+      "approvals:decide",
+      "integrations:read",
+      "integrations:promote"
     ]
   }
 ]
@@ -53,6 +55,8 @@ Available scopes currently used by the API:
 - `tasks:create`
 - `approvals:read`
 - `approvals:decide`
+- `integrations:read`
+- `integrations:promote` (human principals only)
 
 ## 3. Start the development server
 
@@ -75,6 +79,15 @@ The default bind address is loopback for local development. For cloud hosting, p
 | GET | `/v1/tasks` | `tasks:read` |
 | GET | `/v1/approvals` | `approvals:read` |
 | POST | `/v1/approvals/{request_id}/decision` | Human principal with `approvals:decide` |
-| GET | `/v1/feedback/{task_id}` | `tasks:read` |
+| GET | `/v1/feedback/{task_id}` | `tasks:read` |\n| GET | `/v1/integrations` | `integrations:read` |\n| GET | `/v1/integrations/{integration_id}/qa` | `integrations:read` |\n| GET | `/v1/integration-promotions` | `integrations:read` |\n| POST | `/v1/integrations/{integration_id}/promotion-requests` | Human principal with `integrations:promote` |\n| POST | `/v1/integration-promotions/{request_id}/execute` | Human principal with `integrations:promote`, after approval |
 
 The API currently accepts and records top-level tasks but does not yet dispatch them to live model-backed workers. That integration is a later implementation step. SQLite is a development persistence adapter; production multi-user deployment still requires PostgreSQL, hardened identity/token rotation, TLS, rate limiting, backups and operational monitoring.
+
+
+## 5. Git integration controls
+
+Promotion routes are disabled unless the API process is constructed with a trusted `GitWorktreeManager`. This is intentional: API callers must never choose a repository root, worktree directory, Git executable, or target branch. The manager is created by the hosting application from operator-controlled configuration and injected into `create_app(runtime=..., authenticator=..., git_manager=...)`. Keep the source repository checkout and worktree storage on persistent, access-restricted volumes; the manager requires the worktree root to be outside the repository. The manager's base branch is fixed to `development`.
+
+A human requests promotion through the promotion-request route. The API creates a fingerprint-bound `release.deploy` approval request; an authorized human then decides it through the approvals decision route. Only after that approval may a human explicitly call the execute route. The executor rechecks QA, commit identity, branch ancestry and worktree cleanliness before a local fast-forward. It does not push to GitHub or deploy an application. `main` is never a target.
+
+The current API setup is a development integration contract, not a complete cloud deployment recipe. Production still needs a hosting entrypoint that constructs and injects the trusted manager, durable shared storage (PostgreSQL is the planned production adapter), persistent Git volumes, TLS, token rotation, rate limiting, backups and monitoring.
