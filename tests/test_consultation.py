@@ -44,6 +44,20 @@ class SpecialistConsultationTests(unittest.TestCase):
             )
         self.assertEqual(providers.calls, [])
 
+    def test_enforces_per_consultant_call_limit(self):
+        providers = FakeProviders(
+            '{"advice":"Use an adapter.","risks":[],"next_steps":[],"confidence":"medium"}'
+        )
+        consultant = SpecialistConsultant(providers=providers, max_calls=1)
+        args = dict(
+            requesting_role="frontend-developer", specialist_role="architect",
+            objective="Design", question="Review?",
+        )
+        consultant.consult(**args)
+        with self.assertRaises(ConsultationError):
+            consultant.consult(**args)
+        self.assertEqual(len(providers.calls), 1)
+
     def test_rejects_self_consultation(self):
         with self.assertRaises(ConsultationError):
             SpecialistConsultant(providers=FakeProviders("{}")).consult(
