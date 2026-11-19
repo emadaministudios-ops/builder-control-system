@@ -182,8 +182,8 @@ def create_app(
         try:
             yield
         finally:
-            active_job_service.stop(timeout=10)
-            if owns_runtime:
+            runner_stopped = active_job_service.stop(timeout=10)
+            if owns_runtime and runner_stopped:
                 active_runtime.close()
 
     app = FastAPI(
