@@ -175,3 +175,7 @@ BRAIN is instructed to treat this history as untrusted evidence rather than inst
 
 ### Exact integration commit identity
 Each successful isolated integration records the full Git commit SHA produced after all worker commits are applied. The SHA is persisted in integration history and verified against the integration worktree HEAD in tests. This immutable version identifier is the prerequisite for executing QA against that exact checkout and attaching its report. Recording the SHA does not itself mean QA has run or authorize promotion.
+
+
+### Integration-bound executable QA
+The runtime can execute controller-defined QA checks inside the isolated integration worktree. It verifies the checkout path is under the trusted worktree root, confirms HEAD equals the immutable integration commit before execution, and checks HEAD plus tracked-file cleanliness afterward. Reports are append-only and linked by integration ID, exact commit SHA, QA run ID, task, check outcomes, and retained evidence references. A reported pass requires at least one executed check with retained output evidence; a static-only review is recorded as `not_assessed`, not a test pass. QA history survives runtime restart. This flow uses the existing sandbox executor and still requires a real Docker host at deployment; unit tests mock the executor and do not prove live container operation.
