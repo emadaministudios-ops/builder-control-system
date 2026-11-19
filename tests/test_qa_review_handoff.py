@@ -179,7 +179,7 @@ class QAReviewHandoffTests(unittest.TestCase):
             self.assertEqual(calls[0][0], "builder")
             self.assertEqual(calls[1][0], "frontend")
             self.assertEqual(runtime.orchestrator.get_task("auto-parent").state, TaskState.COMPLETED)
-            self.assertIn("not a substitute for executed test evidence", outcome.reason)
+            self.assertIn("No executable tests were configured", outcome.reason)
         finally:
             runtime.close()
 
