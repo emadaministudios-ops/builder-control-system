@@ -2,6 +2,12 @@
 
 This document describes the current development-stage execution components. It is not a production deployment guide.
 
+## Durable background execution jobs
+
+The authenticated API accepts dispatch requests by writing an `execution_jobs` record to SQLite and returning HTTP 202 with a job ID. `ExecutionJobService` runs outside the request, claims queued or expired-running jobs with an atomic SQLite transaction and expiring lease, renews leases while dispatch is active, and commits terminal outcomes only when the lease owner and attempt still match. A replacement worker can reclaim a job after lease expiry; a stale worker cannot overwrite the replacement worker's result. `GET /v1/execution-jobs` and `GET /v1/execution-jobs/{job_id}` expose requester-scoped status. The API validates that submitted tasks exist, IDs are unique, and all task prerequisites are included before enqueue.
+
+This is at-least-once execution, not exactly-once: a crash after workspace side effects but before job completion can cause task IDs to be revisited. The orchestrator marks tasks that were `running` at process restart as failed with an unknown-outcome warning; operators must inspect the workspace before retrying. The SQLite lease and runner are a single-instance development implementation, not distributed cloud coordination. Production multi-replica hosting needs shared PostgreSQL/Redis queue semantics, distributed leases, observability and explicit recovery procedures.
+
 ## Bounded autonomous QA repair loop
 
 The runtime exposes `execute_with_qa(task_id, supervisor, ...)` for a queued task with registered specialist workers. It dispatches the original worker, runs optional controller-configured executable QA, asks the three-pass QA supervisor to review the original objective and changed files, combines both result sets into one feedback cycle, creates repair tasks from failed checks/findings, dispatches those tasks, merges their changed-file/evidence references into the review context, and repeats tests plus source review after each repair. The feedback controller requires at least two distinct combined QA reports before it can return its policy-level `VERIFIED` state. Blocked QA, blocked/failed repair workers, exhausted feedback cycles and the configured repair-round limit stop the loop without a success claim.
