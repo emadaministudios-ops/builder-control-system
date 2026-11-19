@@ -15,7 +15,7 @@ from bcs.policy import ToolRequest
 from bcs.qa import EvidenceStore, QAReportBuilder
 from bcs.sandbox_executor import ExecutionResult
 from bcs.qa_runner import QACheckSpec
-from bcs.qa_supervisor import QAReview, ReviewStatus
+from bcs.qa_supervisor import QAReview, ReviewFinding, ReviewStatus
 from bcs.orchestrator import WorkerResult, WorkerResultStatus
 from bcs.workspace import Workspace
 from bcs.policy import OperatingMode
@@ -107,6 +107,62 @@ class RuntimeCompositionTests(unittest.TestCase):
                 self.assertEqual(outcomes[0]["qa"]["reviews"], 2)
                 self.assertEqual(supervisor.calls, 2)
                 self.assertIn("No executable tests", outcomes[0]["qa"]["reason"])
+            finally:
+                runtime.close()
+
+
+    def test_dependency_plan_qa_creates_repairs_and_rechecks_them(self):
+        class RepairSupervisor:
+            def __init__(self):
+                self.calls = 0
+            def review(self, task, result):
+                self.calls += 1
+                if self.calls == 1:
+                    findings = (ReviewFinding(
+                        requirement_id="R1", severity="high",
+                        issue="The acceptance criterion is not fully demonstrated.",
+                        expected="The module exposes the required public function.",
+                        observed="The worker summary does not confirm the public function.",
+                        suggestion="Add and document the public function.",
+                        file_path="module.py",
+                    ),)
+                    return QAReview(
+                        task_id=task.task_id, status=ReviewStatus.REPAIR_REQUIRED,
+                        requirements=(("R1", "The module exposes the required public function."),),
+                        findings=findings, summary="A repair is required.",
+                        recommended_specialist="builder",
+                    )
+                return QAReview(
+                    task_id=task.task_id, status=ReviewStatus.READY_FOR_TESTS,
+                    requirements=(("R1", "The module exposes the required public function."),),
+                    findings=(), summary="No source-level gaps identified.",
+                    recommended_specialist=None,
+                )
+
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = create_runtime(Path(folder) / "repair-workflow.sqlite3")
+            try:
+                def builder(task):
+                    return WorkerResult(
+                        WorkerResultStatus.COMPLETED,
+                        "Implemented the requested module and public function.",
+                        changed_files=("module.py",),
+                    )
+                runtime.orchestrator.register_worker(
+                    worker_id="repair-builder", role="builder", handler=builder,
+                )
+                task = runtime.orchestrator.create_task(
+                    task_id="repair-workflow-task", objective="Create a public module function.",
+                    acceptance_criteria=("The module exposes the required public function.",),
+                )
+                supervisor = RepairSupervisor()
+                outcomes = runtime.execute_plan_with_qa(
+                    [task.task.task_id], supervisor, max_repair_rounds=2,
+                )
+                self.assertEqual(outcomes[0]["qa"]["status"], "source_review_complete")
+                self.assertEqual(outcomes[0]["qa"]["reviews"], 3)
+                self.assertEqual(len(outcomes[0]["qa"]["repair_task_ids"]), 1)
+                self.assertEqual(supervisor.calls, 3)
             finally:
                 runtime.close()
 
