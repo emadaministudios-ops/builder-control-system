@@ -106,8 +106,12 @@ class BCSRuntime:
         if not capabilities or any(not isinstance(item, str) for item in capabilities):
             raise ValueError("At least one explicit worker capability is required.")
 
+        workspace_cache: dict[str, Workspace] = {}
+
         def gateway_factory(task: WorkerTask) -> WorkspaceToolGateway:
-            workspace = workspace_factory(task)
+            workspace = workspace_cache.get(task.task_id)
+            if workspace is None:
+                workspace = workspace_factory(task)
             if not isinstance(workspace, Workspace):
                 raise TypeError("Workspace factory must return a trusted Workspace.")
             context = PolicyContext(
@@ -174,16 +178,20 @@ class BCSRuntime:
             lease_workspace = workspace_factory(task)
             if not isinstance(lease_workspace, Workspace):
                 raise TypeError("Workspace factory must return a trusted Workspace.")
-            with self.workspace_leases.lease(lease_workspace.root):
-                result = worker(task)
-                consultation_id = consultation_ids.get(task.task_id)
-                if consultation_id is not None:
-                    self.record_consultation_outcome(
-                        consultation_id=consultation_id,
-                        disposition=result.consultation_disposition,
-                        worker_reason=result.consultation_reason,
-                    )
-                return result
+            workspace_cache[task.task_id] = lease_workspace
+            try:
+                with self.workspace_leases.lease(lease_workspace.root):
+                    result = worker(task)
+                    consultation_id = consultation_ids.get(task.task_id)
+                    if consultation_id is not None:
+                        self.record_consultation_outcome(
+                            consultation_id=consultation_id,
+                            disposition=result.consultation_disposition,
+                            worker_reason=result.consultation_reason,
+                        )
+                    return result
+            finally:
+                workspace_cache.pop(task.task_id, None)
 
         worker = ModelWorker(
             worker_id=worker_id,
