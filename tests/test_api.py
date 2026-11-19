@@ -169,7 +169,7 @@ class BCSAPITests(unittest.TestCase):
             )
             self.assertEqual(dispatched.status_code, 200)
             self.assertEqual(dispatched.json()["outcomes"][0]["state"], "completed")
-            self.assertEqual((root / "module.py").read_text(), "VALUE = 7\\n")
+            self.assertEqual((root / "module.py").read_text(), "VALUE = 7\n")
 
     def test_git_manager_requires_both_operator_configured_paths(self):
         with patch.dict(
