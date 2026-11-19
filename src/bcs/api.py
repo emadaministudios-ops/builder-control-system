@@ -432,6 +432,25 @@ def create_app(
             "build_execution": "ready" if execution_handler is not None else "disabled",
         }
 
+    @app.get("/v1/projects")
+    def list_projects(principal: Principal = Depends(require_principal)):
+        """List persistent generated projects without exposing server filesystem paths."""
+        require_scope(principal, "tasks:read")
+        manager = app.state.bcs_git_manager
+        if manager is None:
+            raise HTTPException(status_code=503, detail="Persistent project workspaces are not configured.")
+        projects = []
+        for record in manager.list_workspaces():
+            changed = manager.changed_files(record.workspace_group_id)
+            projects.append({
+                "project_id": record.workspace_group_id,
+                "branch": record.branch,
+                "base_ref": record.base_ref,
+                "status": "modified" if changed else "clean",
+                "changed_files": list(changed),
+            })
+        return {"projects": projects}
+
     @app.get("/v1/tasks")
     def list_tasks(principal: Principal = Depends(require_principal)):
         require_scope(principal, "tasks:read")
