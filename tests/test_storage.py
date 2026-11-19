@@ -107,7 +107,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             path = Path(folder) / "evidence.sqlite3"
             store = SQLiteOrchestrationStore(path)
             stdout, stderr = "all tests passed", "warning: none"
-            raw = (stdout + "\\n--- STDERR ---\\n" + stderr).encode("utf-8")
+            raw = (stdout + "\n--- STDERR ---\n" + stderr).encode("utf-8")
             artifact = {
                 "evidence_ref": "ev_persistent-test",
                 "kind": "execution_output",
@@ -227,7 +227,7 @@ class SQLiteOrchestrationStoreTests(unittest.TestCase):
             connection.close()
             with SQLiteOrchestrationStore(path) as store:
                 version = store._connection.execute("PRAGMA user_version").fetchone()[0]
-                self.assertEqual(version, 10)
+                self.assertEqual(version, 11)
                 self.assertEqual(store.list_consultations(), ())
 
     def test_integration_qa_assessment_is_durable_and_idempotent(self):
