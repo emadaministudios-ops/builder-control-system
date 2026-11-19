@@ -160,6 +160,17 @@ class SQLiteOrchestrationStore:
                             payload TEXT NOT NULL CHECK (json_valid(payload))
                         )
                     """)
+                    self._connection.execute("""
+                        CREATE TABLE IF NOT EXISTS integration_qa_assessments (
+                            integration_id TEXT NOT NULL,
+                            qa_run_id TEXT NOT NULL,
+                            created_at TEXT NOT NULL,
+                            payload TEXT NOT NULL CHECK (json_valid(payload)),
+                            PRIMARY KEY (integration_id, qa_run_id),
+                            FOREIGN KEY (integration_id)
+                                REFERENCES integration_runs(integration_id)
+                        )
+                    """)
                     self._connection.execute(
                         f"PRAGMA user_version = {_SCHEMA_VERSION}"
                     )
@@ -381,6 +392,92 @@ class SQLiteOrchestrationStore:
                 records.append(data)
             except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 raise StorageError("Stored integration record is invalid.") from exc
+        return tuple(records)
+
+
+    def save_integration_qa_assessment(self, record: dict) -> None:
+        """Append an immutable QA assessment bound to an integration commit."""
+        required = {
+            "integration_id", "commit_sha", "qa_run_id", "task_id", "status",
+            "executed_check_count", "evidence_refs", "checks", "started_at",
+            "finished_at",
+        }
+        if not isinstance(record, dict) or set(record) != required:
+            raise StorageError("Integration QA assessment has an invalid shape.")
+        for key in ("integration_id", "commit_sha", "qa_run_id", "task_id", "status"):
+            if not isinstance(record[key], str) or not record[key]:
+                raise StorageError("Integration QA identity fields are required.")
+        if record["status"] not in {"passed", "failed", "blocked", "error", "not_assessed"}:
+            raise StorageError("Unsupported integration QA status.")
+        count = record["executed_check_count"]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise StorageError("Executed check count must be a non-negative integer.")
+        if record["status"] == "passed" and count < 1:
+            raise StorageError("A QA pass requires at least one executed check.")
+        for key in ("evidence_refs", "checks"):
+            if not isinstance(record[key], (tuple, list)):
+                raise StorageError("QA evidence and checks must be arrays.")
+        if any(not isinstance(item, str) or not item for item in record["evidence_refs"]):
+            raise StorageError("QA evidence references must be non-empty strings.")
+        if not isinstance(record["started_at"], str) or not isinstance(record["finished_at"], str):
+            raise StorageError("QA timestamps must be serialized strings.")
+        payload = {"version": 1, **record,
+                   "evidence_refs": list(record["evidence_refs"]),
+                   "checks": list(record["checks"])}
+        encoded = self._json(payload)
+        created_at = datetime.now().astimezone().isoformat()
+        with self._lock:
+            try:
+                with self._connection:
+                    existing = self._connection.execute(
+                        "SELECT payload FROM integration_qa_assessments "
+                        "WHERE integration_id = ? AND qa_run_id = ?",
+                        (record["integration_id"], record["qa_run_id"]),
+                    ).fetchone()
+                    if existing is not None:
+                        if existing["payload"] != encoded:
+                            raise StorageError("QA run ID is already bound to different assessment data.")
+                        return
+                    integration = self._connection.execute(
+                        "SELECT payload FROM integration_runs WHERE integration_id = ?",
+                        (record["integration_id"],),
+                    ).fetchone()
+                    if integration is None:
+                        raise StorageError("Cannot attach QA to an unknown integration.")
+                    integration_data = json.loads(integration["payload"])
+                    if integration_data.get("commit_sha") != record["commit_sha"]:
+                        raise StorageError("QA assessment commit does not match the integration commit.")
+                    self._connection.execute(
+                        "INSERT INTO integration_qa_assessments "
+                        "(integration_id, qa_run_id, created_at, payload) VALUES (?, ?, ?, ?)",
+                        (record["integration_id"], record["qa_run_id"], created_at, encoded),
+                    )
+            except sqlite3.IntegrityError as exc:
+                raise StorageError("QA assessment references an unknown integration or duplicate run.") from exc
+            except sqlite3.Error as exc:
+                raise StorageError("Could not persist integration QA assessment.") from exc
+
+    def list_integration_qa_assessments(self, integration_id: str):
+        if not isinstance(integration_id, str) or not integration_id:
+            raise StorageError("Integration ID is required.")
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT payload FROM integration_qa_assessments "
+                "WHERE integration_id = ? ORDER BY created_at, qa_run_id",
+                (integration_id,),
+            ).fetchall()
+        records = []
+        for row in rows:
+            try:
+                data = json.loads(row["payload"])
+                if not isinstance(data, dict) or data.get("version") != 1:
+                    raise ValueError("Unsupported integration QA assessment.")
+                data.pop("version")
+                data["evidence_refs"] = tuple(data["evidence_refs"])
+                data["checks"] = tuple(data["checks"])
+                records.append(data)
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise StorageError("Stored integration QA assessment is invalid.") from exc
         return tuple(records)
 
     @staticmethod
