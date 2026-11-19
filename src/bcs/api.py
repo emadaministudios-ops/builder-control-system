@@ -79,6 +79,12 @@ class TaskCreateInput(BaseModel):
     acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
 
 
+class PlanCreateInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    objective: str = Field(min_length=1, max_length=20_000)
+    acceptance_criteria: list[str] = Field(default_factory=list, max_length=50)
+
+
 def create_app(
     *,
     runtime: BCSRuntime | None = None,
@@ -167,6 +173,49 @@ def create_app(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
             ) from exc
         return {"task": _task_view(record)}
+
+    @app.post("/v1/plans", status_code=status.HTTP_201_CREATED)
+    def create_plan(
+        payload: PlanCreateInput,
+        principal: Principal = Depends(require_principal),
+    ):
+        require_scope(principal, "tasks:create")
+        if principal.actor_type.value != "human":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only an authenticated human principal may create top-level plans.",
+            )
+        criteria = payload.acceptance_criteria or [
+            "Satisfy the original user objective without weakening its explicit constraints.",
+            "Provide QA evidence and report unresolved limitations honestly.",
+        ]
+        try:
+            plan, records = active_runtime.plan_and_create_tasks(
+                payload.objective, criteria
+            )
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="BCS could not create a valid task plan.",
+            ) from exc
+        return {
+            "plan": {
+                "objective": plan.objective,
+                "acceptance_criteria": list(plan.acceptance_criteria),
+                "execution_order": list(plan.execution_order),
+                "steps": [
+                    {
+                        "step_id": step.step_id,
+                        "role": step.role,
+                        "objective": step.objective,
+                        "acceptance_criteria": list(step.acceptance_criteria),
+                        "depends_on": list(step.depends_on),
+                    }
+                    for step in plan.steps
+                ],
+            },
+            "tasks": [_task_view(record) for record in records],
+        }
 
     @app.get("/v1/approvals")
     def list_approvals(principal: Principal = Depends(require_principal)):
